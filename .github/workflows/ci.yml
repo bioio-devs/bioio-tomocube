@@ -1,0 +1,103 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - main
+  schedule:
+    # Run every Monday at 10:24:00 PST
+    - cron: "24 18 * * 1"
+  workflow_dispatch:
+
+jobs:
+  # Check that all files listed in manifest make it into build
+  check-manifest:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.x"
+      - run: pip install check-manifest && check-manifest
+
+  # Shared test workflow from bioio-base
+  test:
+    needs: [lint]
+    permissions:
+      id-token: write
+      contents: read
+    uses: bioio-devs/bioio-base/.github/workflows/shared_test.yml@main
+
+  # Shared lint workflow from bioio-base
+  lint:
+    uses: bioio-devs/bioio-base/.github/workflows/shared_lint.yml@main
+
+  # Benchmark job
+  benchmark:
+    needs: [check-manifest, lint]
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          lfs: true
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - uses: extractions/setup-just@v4
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - run: python -m pip install --upgrade pip && just install
+      - run: just benchmark
+      - uses: actions/upload-artifact@v7
+        with:
+          name: benchmark-results
+          path: output.csv
+          if-no-files-found: error
+
+  # Publish to PyPI if test, lint, manifest, and benchmark checks passed
+  publish:
+    if: "success() && startsWith(github.ref, 'refs/tags/')"
+    needs: [check-manifest, test, lint, benchmark]
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      id-token: write
+
+    steps:
+    - uses: actions/checkout@v7
+    - name: Set up Python
+      uses: actions/setup-python@v6
+      with:
+        python-version: "3.11"
+    - name: Install Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install build wheel
+    - name: Build Package
+      run: |
+        python -m build
+    - name: Publish to PyPI
+      uses: pypa/gh-action-pypi-publish@release/v1
+
+  results:
+    if: ${{ always() && github.event_name == 'pull_request' }}
+    needs: [check-manifest, test, lint, benchmark]
+    runs-on: ubuntu-latest
+    name: Report Result
+    steps:
+      - run: exit 1
+        if: >-
+          ${{
+                contains(needs.*.result, 'failure')
+            || contains(needs.*.result, 'cancelled')
+          }}
