@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import h5py
 import numpy as np
 from ome_types.model import (
+    OME,
     Channel,
     Experimenter,
     ExperimenterRef,
@@ -16,7 +17,6 @@ from ome_types.model import (
     InstrumentRef,
     Objective,
     Objective_Immersion,
-    OME,
     Pixels,
     Pixels_DimensionOrder,
     PixelType,
@@ -24,6 +24,7 @@ from ome_types.model import (
     UnitsLength,
     UnitsTime,
 )
+
 log = logging.getLogger(__name__)
 
 _DATA_ROOT = "Data"

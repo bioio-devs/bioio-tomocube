@@ -1,7 +1,7 @@
+import dask.array as da
 import fsspec
 import numpy as np
 import pytest
-import dask.array as da
 from ome_types.model import OME
 
 from bioio_tomocube import Reader
@@ -71,7 +71,7 @@ def test_remote_dask_backed(mem_fs):
 
 
 def test_remote_compute_first_frame(mem_fs):
-    """Computing a single frame via the memory filesystem must return correct shape/dtype."""
+    """First frame via memory filesystem must have correct shape and dtype."""
     rdr = Reader(_MEM_URL)
     rdr.set_scene("3D")
     frame = rdr.xarray_dask_data[0].compute()

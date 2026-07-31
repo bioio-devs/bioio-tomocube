@@ -17,7 +17,9 @@ from bioio_tomocube.ome_utils import (
     _deserialize_attr,
     _detect_channel_idx,
     _frame_key,
-    _scene_group_key as _scene_group_key_util,
+)
+from bioio_tomocube.ome_utils import _scene_group_key as _scene_group_key_util
+from bioio_tomocube.ome_utils import (
     build_ome,
 )
 
@@ -112,10 +114,10 @@ class Reader(reader.Reader):
     * ``"3DFL/CH0"``, ``"3DFL/CH1"``, … — 3-D fluorescence channels
     """
 
+    _physical_pixel_sizes: Optional[types.PhysicalPixelSizes]
+
     @staticmethod
-    def _is_supported_image(
-        fs: AbstractFileSystem, path: str, **kwargs: Any
-    ) -> bool:
+    def _is_supported_image(fs: AbstractFileSystem, path: str, **kwargs: Any) -> bool:
         if path.upper().endswith(".TCF"):
             return True
         raise exceptions.UnsupportedFileFormatError(
@@ -283,10 +285,12 @@ class Reader(reader.Reader):
         else:
             with self._fs.open(self._path, "rb") as fobj:
                 with h5py.File(fobj, "r") as f:
-                    array_data = np.stack([
-                        self._read_frame(f, scene_group_key, info.channel_idx, i)
-                        for i in range(info.n_frames)
-                    ])
+                    array_data = np.stack(
+                        [
+                            self._read_frame(f, scene_group_key, info.channel_idx, i)
+                            for i in range(info.n_frames)
+                        ]
+                    )
 
         return xr.DataArray(
             array_data,
