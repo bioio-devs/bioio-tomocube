@@ -59,6 +59,15 @@ directly via a pull request — the file must be committed to LFS by a project
 maintainer. Open an issue requesting the fixture, attach the file or a link
 to it, and a maintainer will add it.
 
+TIFF-export fixtures live in `bioio_tomocube/tests/resources/tiff/` and are
+also tracked by Git LFS. They are real HTX ProcessingServer exports
+cropped to 32x32 pixels with every TIFF tag and page preserved, so they
+reproduce the real files' quirks (for example the FL3D ImageJ header that
+reports `slices=12` while the file holds 70 pages). To regenerate them from a
+full-size acquisition, crop each page with `tifffile` and copy the
+`ImageDescription`, `Model`, `Software`, `DateTime`, `Artist`, `HostComputer`
+and resolution tags of the first page verbatim.
+
 ## Release Process (Maintainers Only)
 
 ```bash

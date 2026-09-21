@@ -5,7 +5,7 @@
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.10–3.13](https://img.shields.io/badge/python-3.10--3.13-blue.svg)](https://www.python.org/downloads/)
 
-A BioIO reader plugin for reading Tomocube TCF holotomography files.
+A BioIO reader plugin for Tomocube holotomography data: `.TCF` files and HTX `.TIFF` exports.
 
 ---
 
@@ -23,21 +23,66 @@ For full documentation of the `BioImage` API, see
 
 ## Overview
 
-This plugin reads `.TCF` files produced by [Tomocube](https://www.tomocube.com) HT-series
-holotomography instruments. Pixel data is read directly from the HDF5 structure inside
-each TCF file via `h5py`; no proprietary library is required.
+This plugin reads data produced by [Tomocube](https://www.tomocube.com) HT-series
+holotomography instruments in either of the two forms it leaves the instrument in:
 
-Each imaging modality stored in the file is exposed as a separate BioIO **scene**:
+| Format | Extension | Written by | Backend |
+|---|---|---|---|
+| TCF (HDF5 container) | `.TCF` | TomoStudio | `bioio_tomocube.TCFReader` (via `h5py`) |
+| TIFF export (one ImageJ-style multi-page TIFF per modality and channel) | `.TIFF` / `.TIF` | HTX ProcessingServer | `bioio_tomocube.TiffReader` (via `tifffile`) |
+
+`bioio_tomocube.Reader` picks the backend from the file extension, so the same code
+works for both. No proprietary library is required.
+
+Each imaging modality is exposed as a separate BioIO **scene** with the same names in
+both formats:
 
 | Scene name | Content | Dimensions |
 |---|---|---|
 | `3D` | 3-D refractive index volume | `TZYX` |
-| `2DMIP` | 2-D max intensity projection | `TYX` |
-| `2DFLMIP` | 2-D fluorescence max intensity projection | `TYX` |
+| `2DMIP` | 2-D refractive index max intensity projection | `TYX` |
 | `3DFL/CH0`, `3DFL/CH1`, … | 3-D fluorescence channels | `TZYX` |
+| `2DFLMIP` (TCF) / `2DFLMIP/CH0`, … (TIFF) | 2-D fluorescence max intensity projection | `TYX` |
 
-All pixel data is returned as `float32`. Physical pixel sizes (µm) are read from the
-HDF5 metadata and exposed via `physical_pixel_sizes`.
+Physical pixel sizes (µm) are exposed via `physical_pixel_sizes` for both formats.
+
+### TCF files
+
+Pixel data is read directly from the HDF5 structure and returned as `float32`.
+
+### TIFF exports
+
+An HTX export of one acquisition (one timepoint) looks like this on disk:
+
+```
+<base>.TP01_HT3D_0.00.TIFF              # refractive-index volume
+<base>.TP01/
+    <base>.TP01_FL3D_CH0_0.00.TIFF      # fluorescence volume, channel 0
+    <base>.TP01_FL3D_CH1_0.00.TIFF
+    <base>.TP01_FL2D_CH0_0.00.TIFF      # fluorescence max projection (optional)
+```
+
+Pass **any** of those files to the reader; the sibling files of the same acquisition
+are discovered automatically and the default scene is the modality of the file you
+passed. Pixel data is returned as stored (`uint16`).
+
+Two options are specific to this backend:
+
+* `timelapse=True` stacks every `<base>.TPnn` timepoint found next to the file along
+  `T`, ordered by timepoint. `time_interval` and the OME planes are derived from the
+  TIFF `DateTime` tags.
+* `refractive_index=True` returns the `3D`/`2DMIP` scenes as `float32` refractive
+  index. The export stores refractive index × 10 000 as `uint16`.
+
+Quirks of the export that the reader handles for you:
+
+* The `FL3D` volumes are resampled onto the HT Z grid, but their ImageJ header still
+  reports the original fluorescence slice count and spacing. `tifffile` alone
+  therefore reports the wrong shape. This reader always enumerates the TIFF pages
+  directly and uses the `HT3D` sibling's Z spacing for `FL3D` scenes; the header value
+  is kept in `reader.tiff_metadata["imagej"]`.
+* Fluorescence data occupies only a sub-range of the Z planes; the remaining planes
+  are zero.
 
 ## Example Usage
 
@@ -45,17 +90,22 @@ HDF5 metadata and exposed via `physical_pixel_sizes`.
 from bioio import BioImage
 import bioio_tomocube
 
+# TCF
 img = BioImage("my_file.TCF", reader=bioio_tomocube.Reader)
-
-# list modalities
 print(img.scenes)          # ('2DMIP', '3D', '3DFL/CH0', ...)
-
-# read the refractive-index volume as a dask array
 img.set_scene("3D")
 data = img.get_image_dask_data("TZYX")
-
-# physical pixel sizes in µm
 print(img.physical_pixel_sizes)  # PhysicalPixelSizes(Z=0.22, Y=0.11, X=0.11)
+
+# TIFF export: one timepoint, raw uint16
+img = BioImage("exp.TP01_HT3D_0.00.TIFF")   # auto-selected, no reader= needed
+print(img.scenes)          # ('3D', '3DFL/CH0', '3DFL/CH1')
+
+# TIFF export: all timepoints stacked along T, HT volume as refractive index
+img = BioImage("exp.TP01_HT3D_0.00.TIFF", timelapse=True, refractive_index=True)
+img.set_scene("3D")
+ri = img.get_image_dask_data("TZYX")        # float32
+print(img.time_interval)                    # mean interval between timepoints
 ```
 
 ## Remote Filesystem Support

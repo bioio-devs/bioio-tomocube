@@ -3,10 +3,11 @@
 
 import logging
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 import h5py
 import numpy as np
+from bioio_base.types import PhysicalPixelSizes
 from ome_types.model import (
     OME,
     Channel,
@@ -15,6 +16,7 @@ from ome_types.model import (
     Image,
     Instrument,
     InstrumentRef,
+    Microscope,
     Objective,
     Objective_Immersion,
     Pixels,
@@ -293,4 +295,150 @@ def build_ome(f: "h5py.File", scenes: Tuple[str, ...]) -> OME:
     if experimenters:
         ome_kwargs["experimenters"] = experimenters
 
+    return OME(**ome_kwargs)
+
+
+###############################################################################
+# TIFF export → OME
+###############################################################################
+
+_NUMPY_TO_OME_PIXEL_TYPE = {
+    "int8": PixelType.INT8,
+    "int16": PixelType.INT16,
+    "int32": PixelType.INT32,
+    "uint8": PixelType.UINT8,
+    "uint16": PixelType.UINT16,
+    "uint32": PixelType.UINT32,
+    "float32": PixelType.FLOAT,
+    "float64": PixelType.DOUBLE,
+}
+
+
+class TiffOmeScene(NamedTuple):
+    """Description of one TIFF-export scene, consumed by :func:`build_tiff_ome`."""
+
+    name: str
+    size_x: int
+    size_y: int
+    size_z: int
+    size_t: int
+    dtype: np.dtype
+    pixel_sizes: PhysicalPixelSizes
+    datetimes: Sequence[Optional[datetime]]
+    channel_name: str
+    title: Optional[str] = None
+
+
+def _build_tiff_image(
+    scene: TiffOmeScene, image_index: int, has_instrument: bool, has_experimenter: bool
+) -> Image:
+    """Build one OME ``Image`` for a TIFF-export scene."""
+    planes: List[Plane] = []
+    t0 = next((dt for dt in scene.datetimes if dt is not None), None)
+    for t_idx in range(scene.size_t):
+        dt = scene.datetimes[t_idx] if t_idx < len(scene.datetimes) else None
+        plane_kwargs: Dict[str, Any] = {"the_t": t_idx, "the_z": 0, "the_c": 0}
+        if dt is not None and t0 is not None:
+            plane_kwargs["delta_t"] = (dt - t0).total_seconds()
+            plane_kwargs["delta_t_unit"] = UnitsTime.SECOND
+        planes.append(Plane(**plane_kwargs))
+
+    px_kwargs: Dict[str, Any] = {
+        "id": f"Pixels:{image_index}",
+        "size_x": scene.size_x,
+        "size_y": scene.size_y,
+        "size_z": scene.size_z,
+        "size_t": scene.size_t,
+        "size_c": 1,
+        "type": _NUMPY_TO_OME_PIXEL_TYPE.get(
+            np.dtype(scene.dtype).name, PixelType.UINT16
+        ),
+        "dimension_order": Pixels_DimensionOrder.XYZCT,
+        "channels": [
+            Channel(
+                id=f"Channel:{image_index}:0",
+                name=scene.channel_name,
+                samples_per_pixel=1,
+            )
+        ],
+        "planes": planes,
+    }
+    for axis in ("x", "y", "z"):
+        value = getattr(scene.pixel_sizes, axis.upper())
+        if value is not None:
+            px_kwargs[f"physical_size_{axis}"] = float(value)
+            px_kwargs[f"physical_size_{axis}_unit"] = UnitsLength.MICROMETER
+    if scene.size_t > 1 and t0 is not None:
+        last = scene.datetimes[-1]
+        if last is not None:
+            px_kwargs["time_increment"] = (last - t0).total_seconds() / (
+                scene.size_t - 1
+            )
+            px_kwargs["time_increment_unit"] = UnitsTime.SECOND
+
+    img_kwargs: Dict[str, Any] = {
+        "id": f"Image:{image_index}",
+        "name": scene.title or scene.name,
+        "pixels": Pixels(**px_kwargs),
+    }
+    if t0 is not None:
+        img_kwargs["acquisition_date"] = t0
+    if has_instrument:
+        img_kwargs["instrument_ref"] = InstrumentRef(id="Instrument:0")
+    if has_experimenter:
+        img_kwargs["experimenter_ref"] = ExperimenterRef(id="Experimenter:0")
+    return Image(**img_kwargs)
+
+
+def build_tiff_ome(
+    scenes: Sequence[TiffOmeScene],
+    model: Optional[str] = None,
+    software: Optional[str] = None,
+    user: Optional[str] = None,
+) -> OME:
+    """Construct a multi-image OME for a set of Tomocube TIFF-export scenes.
+
+    One :class:`ome_types.model.Image` is built per scene, in order, so that
+    ``ome.images[i]`` corresponds to ``Reader.scenes[i]``.
+
+    Parameters
+    ----------
+    scenes:
+        Ordered scene descriptions.
+    model:
+        TIFF ``Model`` tag (e.g. ``"HTX"``); becomes the OME microscope model.
+    software:
+        TIFF ``Software`` tag; recorded on the microscope as its serial-free
+        description via ``lot_number`` is not appropriate, so it is ignored
+        unless *model* is missing, in which case it is used as the model.
+    user:
+        TIFF ``Artist`` tag; becomes the OME experimenter user name.
+    """
+    instrument: Optional[Instrument] = None
+    microscope_model = model or software
+    if microscope_model:
+        instrument = Instrument(
+            id="Instrument:0",
+            microscope=Microscope(manufacturer="Tomocube", model=microscope_model),
+        )
+
+    experimenters: List[Experimenter] = []
+    if user and user.strip():
+        experimenters.append(Experimenter(id="Experimenter:0", user_name=user.strip()))
+
+    images = [
+        _build_tiff_image(
+            scene,
+            i,
+            has_instrument=instrument is not None,
+            has_experimenter=bool(experimenters),
+        )
+        for i, scene in enumerate(scenes)
+    ]
+
+    ome_kwargs: Dict[str, Any] = {"images": images}
+    if instrument is not None:
+        ome_kwargs["instruments"] = [instrument]
+    if experimenters:
+        ome_kwargs["experimenters"] = experimenters
     return OME(**ome_kwargs)
