@@ -1,0 +1,2 @@
+*.TCF filter=lfs diff=lfs merge=lfs -text
+bioio_tomocube/tests/resources/tiff/**/*.TIFF filter=lfs diff=lfs merge=lfs -text
