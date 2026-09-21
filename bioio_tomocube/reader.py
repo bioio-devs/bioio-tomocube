@@ -93,9 +93,7 @@ class Reader(reader.Reader):
             if image is None:
                 raise TypeError("Reader() missing required argument: 'image'")
             fs_kwargs = kwargs.get("fs_kwargs") or {}
-            _, path = io.pathlike_to_fs(
-                image, enforce_exists=True, fs_kwargs=fs_kwargs
-            )
+            _, path = io.pathlike_to_fs(image, enforce_exists=True, fs_kwargs=fs_kwargs)
             backend = _select_backend(path)
             return super().__new__(backend)
         return super().__new__(cls)

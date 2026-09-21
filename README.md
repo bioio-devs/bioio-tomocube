@@ -34,15 +34,22 @@ holotomography instruments in either of the two forms it leaves the instrument i
 `bioio_tomocube.Reader` picks the backend from the file extension, so the same code
 works for both. No proprietary library is required.
 
-Each imaging modality is exposed as a separate BioIO **scene** with the same names in
-both formats:
+The two formats differ in how modalities are organised:
 
-| Scene name | Content | Dimensions |
-|---|---|---|
-| `3D` | 3-D refractive index volume | `TZYX` |
-| `2DMIP` | 2-D refractive index max intensity projection | `TYX` |
-| `3DFL/CH0`, `3DFL/CH1`, … | 3-D fluorescence channels | `TZYX` |
-| `2DFLMIP` (TCF) / `2DFLMIP/CH0`, … (TIFF) | 2-D fluorescence max intensity projection | `TYX` |
+* **TCF**: each modality is a separate BioIO **scene**, because the HDF5 file stores
+  the refractive-index and fluorescence volumes on different pixel grids.
+* **TIFF export**: the processing server has already resampled every modality onto
+  one pixel grid, so the modalities become the **channels** of a single scene, giving
+  you the usual `TCZYX` image straight away.
+
+| Format | Scene | Content | Dimensions / channels |
+|---|---|---|---|
+| TCF | `3D` | 3-D refractive index volume | `TZYX` |
+| TCF | `2DMIP` | 2-D refractive index max projection | `TYX` |
+| TCF | `3DFL/CH0`, `3DFL/CH1`, … | 3-D fluorescence channels | `TZYX` |
+| TCF | `2DFLMIP` | 2-D fluorescence max projection | `TYX` |
+| TIFF | `3D` | volumes | `TCZYX`, channels `HT`, `FL_CH0`, `FL_CH1`, … |
+| TIFF | `2DMIP` | max projections (when exported) | `TCYX`, same channel names |
 
 Physical pixel sizes (µm) are exposed via `physical_pixel_sizes` for both formats.
 
@@ -55,34 +62,41 @@ Pixel data is read directly from the HDF5 structure and returned as `float32`.
 An HTX export of one acquisition (one timepoint) looks like this on disk:
 
 ```
-<base>.TP01_HT3D_0.00.TIFF              # refractive-index volume
+<base>.TP01_HT3D_0.00.TIFF              # refractive-index volume  -> channel HT
 <base>.TP01/
-    <base>.TP01_FL3D_CH0_0.00.TIFF      # fluorescence volume, channel 0
-    <base>.TP01_FL3D_CH1_0.00.TIFF
-    <base>.TP01_FL2D_CH0_0.00.TIFF      # fluorescence max projection (optional)
+    <base>.TP01_FL3D_CH0_0.00.TIFF      # fluorescence volume      -> channel FL_CH0
+    <base>.TP01_FL3D_CH1_0.00.TIFF      #                          -> channel FL_CH1
+    <base>.TP01_FL2D_CH0_0.00.TIFF      # fluorescence MIP (optional) -> scene 2DMIP
 ```
 
 Pass **any** of those files to the reader; the sibling files of the same acquisition
-are discovered automatically and the default scene is the modality of the file you
-passed. Pixel data is returned as stored (`uint16`).
+are discovered automatically and combined along `C`. The default scene is the one
+containing the file you passed. Pixel data is returned as stored (`uint16`); the `HT`
+channel holds refractive index × 10 000.
 
 Two options are specific to this backend:
 
 * `timelapse=True` stacks every `<base>.TPnn` timepoint found next to the file along
   `T`, ordered by timepoint. `time_interval` and the OME planes are derived from the
-  TIFF `DateTime` tags.
-* `refractive_index=True` returns the `3D`/`2DMIP` scenes as `float32` refractive
-  index. The export stores refractive index × 10 000 as `uint16`.
+  TIFF `DateTime` tags. Only timepoints at which **every** channel of a scene was
+  exported are kept; incomplete timepoints are dropped with a warning rather than
+  zero-filled.
+* `refractive_index=True` converts the `HT` channel to refractive index. Because all
+  channels share one array, the whole scene is then returned as `float32` and the
+  fluorescence channels are cast.
 
 Quirks of the export that the reader handles for you:
 
 * The `FL3D` volumes are resampled onto the HT Z grid, but their ImageJ header still
   reports the original fluorescence slice count and spacing. `tifffile` alone
   therefore reports the wrong shape. This reader always enumerates the TIFF pages
-  directly and uses the `HT3D` sibling's Z spacing for `FL3D` scenes; the header value
-  is kept in `reader.tiff_metadata["imagej"]`.
+  directly and takes the Z spacing from the `HT` channel; the per-channel header
+  values are kept in `reader.tiff_metadata["imagej"]`.
 * Fluorescence data occupies only a sub-range of the Z planes; the remaining planes
   are zero.
+* Should an export ever place modalities on different pixel grids, the reader falls
+  back to one scene per channel (`3D/HT`, `3D/FL_CH0`, …) and logs a warning instead
+  of resampling.
 
 ## Example Usage
 
@@ -97,14 +111,15 @@ img.set_scene("3D")
 data = img.get_image_dask_data("TZYX")
 print(img.physical_pixel_sizes)  # PhysicalPixelSizes(Z=0.22, Y=0.11, X=0.11)
 
-# TIFF export: one timepoint, raw uint16
+# TIFF export: one timepoint, all modalities as channels, raw uint16
 img = BioImage("exp.TP01_HT3D_0.00.TIFF")   # auto-selected, no reader= needed
-print(img.scenes)          # ('3D', '3DFL/CH0', '3DFL/CH1')
+print(img.scenes)          # ('3D',)  or ('3D', '2DMIP') when MIPs were exported
+print(img.channel_names)   # ['HT', 'FL_CH0', 'FL_CH1']
+fl0 = img.get_image_dask_data("ZYX", C=1)
 
-# TIFF export: all timepoints stacked along T, HT volume as refractive index
+# TIFF export: all timepoints stacked along T, HT channel as refractive index
 img = BioImage("exp.TP01_HT3D_0.00.TIFF", timelapse=True, refractive_index=True)
-img.set_scene("3D")
-ri = img.get_image_dask_data("TZYX")        # float32
+data = img.get_image_dask_data("TCZYX")     # float32
 print(img.time_interval)                    # mean interval between timepoints
 ```
 

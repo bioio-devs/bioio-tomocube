@@ -325,7 +325,7 @@ class TiffOmeScene(NamedTuple):
     dtype: np.dtype
     pixel_sizes: PhysicalPixelSizes
     datetimes: Sequence[Optional[datetime]]
-    channel_name: str
+    channel_names: Sequence[str]
     title: Optional[str] = None
 
 
@@ -337,11 +337,12 @@ def _build_tiff_image(
     t0 = next((dt for dt in scene.datetimes if dt is not None), None)
     for t_idx in range(scene.size_t):
         dt = scene.datetimes[t_idx] if t_idx < len(scene.datetimes) else None
-        plane_kwargs: Dict[str, Any] = {"the_t": t_idx, "the_z": 0, "the_c": 0}
-        if dt is not None and t0 is not None:
-            plane_kwargs["delta_t"] = (dt - t0).total_seconds()
-            plane_kwargs["delta_t_unit"] = UnitsTime.SECOND
-        planes.append(Plane(**plane_kwargs))
+        for c_idx in range(len(scene.channel_names)):
+            plane_kwargs: Dict[str, Any] = {"the_t": t_idx, "the_z": 0, "the_c": c_idx}
+            if dt is not None and t0 is not None:
+                plane_kwargs["delta_t"] = (dt - t0).total_seconds()
+                plane_kwargs["delta_t_unit"] = UnitsTime.SECOND
+            planes.append(Plane(**plane_kwargs))
 
     px_kwargs: Dict[str, Any] = {
         "id": f"Pixels:{image_index}",
@@ -349,17 +350,18 @@ def _build_tiff_image(
         "size_y": scene.size_y,
         "size_z": scene.size_z,
         "size_t": scene.size_t,
-        "size_c": 1,
+        "size_c": len(scene.channel_names),
         "type": _NUMPY_TO_OME_PIXEL_TYPE.get(
             np.dtype(scene.dtype).name, PixelType.UINT16
         ),
         "dimension_order": Pixels_DimensionOrder.XYZCT,
         "channels": [
             Channel(
-                id=f"Channel:{image_index}:0",
-                name=scene.channel_name,
+                id=f"Channel:{image_index}:{c_idx}",
+                name=channel_name,
                 samples_per_pixel=1,
             )
+            for c_idx, channel_name in enumerate(scene.channel_names)
         ],
         "planes": planes,
     }

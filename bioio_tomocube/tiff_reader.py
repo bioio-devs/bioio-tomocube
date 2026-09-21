@@ -15,8 +15,11 @@ laid out as::
         ...
 
 Pointing :class:`TiffReader` at *any* of these files discovers the sibling
-files of the same acquisition and exposes each modality/channel as a scene
-using the same names as the TCF reader (``"3D"``, ``"3DFL/CH0"``, …).
+files of the same acquisition.  The export places every modality on the same
+pixel grid, so the modalities are combined into the **channels** of one image:
+
+* scene ``"3D"`` — ``TCZYX`` with channels ``HT``, ``FL_CH0``, ``FL_CH1``, …
+* scene ``"2DMIP"`` — ``TCYX`` max projections with the same channel naming
 
 Known quirks of the export that this reader compensates for:
 
@@ -24,14 +27,14 @@ Known quirks of the export that this reader compensates for:
 * ``FL3D`` volumes are resampled onto the HT Z grid (same page count as the
   ``HT3D`` file) but the ImageJ header still reports the *original* FL slice
   count and spacing.  ``tifffile`` trusts that header and reports the wrong
-  shape, so this reader always enumerates TIFF pages directly and, when an
-  ``HT3D`` sibling with the same page count exists, uses the HT Z spacing.
+  shape, so this reader always enumerates TIFF pages directly and takes the
+  Z spacing from the ``HT`` channel.
 """
 
 import logging
 import re
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, NamedTuple, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 import dask
 import dask.array as da
@@ -58,15 +61,18 @@ TIFF_EXTENSIONS = (".tiff", ".tif")
 #: ``HT3D``/``HT2D`` store refractive index * 10 000 as uint16.
 RI_SCALE = 1.0e-4
 
+#: Channel name used for the holotomography (refractive index) modality.
+HT_CHANNEL = "HT"
+
 _MODALITY_TO_SCENE = {
     "HT3D": "3D",
+    "FL3D": "3D",
     "HT2D": "2DMIP",
-    "FL3D": "3DFL",
-    "FL2D": "2DFLMIP",
+    "FL2D": "2DMIP",
 }
 _HT_MODALITIES = frozenset({"HT3D", "HT2D"})
 _VOLUME_MODALITIES = frozenset({"HT3D", "FL3D"})
-_SCENE_ORDER = ("3D", "2DMIP", "3DFL", "2DFLMIP")
+_SCENE_ORDER = ("3D", "2DMIP")
 
 # <base>[.TPnn]_<MODALITY>[_CHn]_<suffix>.TIFF
 _FILENAME_RE = re.compile(
@@ -94,15 +100,6 @@ _IMAGEJ_UNIT_TO_UM = {
 }
 _TAGS_TO_SKIP = frozenset({"StripOffsets", "StripByteCounts", "TileOffsets"})
 
-_SPATIAL_DIMS = (
-    DimensionNames.SpatialZ,
-    DimensionNames.SpatialY,
-    DimensionNames.SpatialX,
-)
-
-# Sentinel distinguishing "not yet cached" from None (a valid return value)
-_NOT_CACHED: Any = object()
-
 
 ###############################################################################
 # File-name parsing and acquisition discovery
@@ -122,15 +119,19 @@ class TomocubeFile(NamedTuple):
 
     @property
     def scene(self) -> str:
-        """Scene name in TCF-reader nomenclature (e.g. ``"3DFL/CH0"``)."""
-        scene = _MODALITY_TO_SCENE[self.modality]
-        if self.channel is not None:
-            return f"{scene}/CH{self.channel}"
-        return scene
+        """Scene this file contributes to (``"3D"`` or ``"2DMIP"``)."""
+        return _MODALITY_TO_SCENE[self.modality]
 
     @property
     def is_ht(self) -> bool:
         return self.modality in _HT_MODALITIES
+
+    @property
+    def channel_name(self) -> str:
+        """Channel name (``"HT"``, ``"FL_CH0"``, …) within the scene."""
+        if self.is_ht:
+            return HT_CHANNEL
+        return f"FL_CH{self.channel or 0}"
 
 
 def _basename(path: str) -> str:
@@ -160,10 +161,18 @@ def parse_filename(path: str) -> Optional[TomocubeFile]:
     )
 
 
-def _scene_sort_key(scene: str) -> Tuple[int, int]:
-    prefix, _, ch = scene.partition("/CH")
+def _channel_sort_key(name: str) -> Tuple[int, int]:
+    """``HT`` first, then fluorescence channels by index."""
+    if name == HT_CHANNEL:
+        return (0, -1)
+    match = re.search(r"(\d+)$", name)
+    return (1, int(match.group(1)) if match else 0)
+
+
+def _scene_sort_key(scene: str) -> Tuple[int, str]:
+    prefix = scene.split("/", 1)[0]
     order = _SCENE_ORDER.index(prefix) if prefix in _SCENE_ORDER else len(_SCENE_ORDER)
-    return order, int(ch) if ch else -1
+    return order, scene
 
 
 def _list_dir(fs: AbstractFileSystem, directory: str) -> Tuple[List[str], List[str]]:
@@ -192,7 +201,7 @@ def _list_dir(fs: AbstractFileSystem, directory: str) -> Tuple[List[str], List[s
 
 def discover_acquisition(
     fs: AbstractFileSystem, path: str, timelapse: bool = False
-) -> Dict[str, List[TomocubeFile]]:
+) -> List[TomocubeFile]:
     """Find every exported file belonging to the acquisition *path* is part of.
 
     Parameters
@@ -202,13 +211,12 @@ def discover_acquisition(
     timelapse:
         When ``False`` only files of the anchor's timepoint are returned.
         When ``True`` all timepoints sharing the anchor's ``<base>`` are
-        collected, sorted by timepoint, so each scene gains a T dimension.
+        collected so each scene gains a T dimension.
 
     Returns
     -------
-    Dict[str, List[TomocubeFile]]
-        Mapping of scene name to the files that make up that scene, ordered
-        by timepoint.
+    List[TomocubeFile]
+        Every matching file, sorted by scene, timepoint and channel.
     """
     anchor = parse_filename(path)
     if anchor is None:
@@ -236,7 +244,7 @@ def discover_acquisition(
         if wanted:
             candidates.extend(_list_dir(fs, directory)[0])
 
-    scenes: Dict[str, List[TomocubeFile]] = {}
+    found: List[TomocubeFile] = []
     seen: set = set()
     for candidate in candidates:
         info = parse_filename(candidate)
@@ -244,22 +252,26 @@ def discover_acquisition(
             continue
         if not timelapse and info.timepoint != anchor.timepoint:
             continue
-        key = (info.scene, info.timepoint, _basename(candidate))
+        key = (info.scene, info.channel_name, info.timepoint, _basename(candidate))
         if key in seen:
             continue
         seen.add(key)
-        scenes.setdefault(info.scene, []).append(info)
+        found.append(info)
 
     # Listing may be unavailable on some filesystems; always include the anchor.
-    anchor_key = (anchor.scene, anchor.timepoint, _basename(path))
+    anchor_key = (anchor.scene, anchor.channel_name, anchor.timepoint, _basename(path))
     if anchor_key not in seen:
-        scenes.setdefault(anchor.scene, []).append(anchor)
+        found.append(anchor)
 
-    for members in scenes.values():
-        members.sort(
-            key=lambda f: (f.timepoint is not None, f.timepoint or 0, f.path),
+    found.sort(
+        key=lambda f: (
+            _scene_sort_key(f.scene),
+            f.timepoint is not None,
+            f.timepoint or 0,
+            _channel_sort_key(f.channel_name),
         )
-    return dict(sorted(scenes.items(), key=lambda kv: _scene_sort_key(kv[0])))
+    )
+    return found
 
 
 ###############################################################################
@@ -290,6 +302,11 @@ class _FileHeader(NamedTuple):
     z_spacing: Optional[float]  # from the ImageJ header, µm
     tags: Dict[str, Any]
     imagej: Dict[str, Any]
+
+    @property
+    def grid(self) -> Tuple[int, int, int, str]:
+        """Signature that must match for files to share one array."""
+        return (self.n_pages, self.size_y, self.size_x, self.dtype.str)
 
 
 def _plain(value: Any) -> Any:
@@ -378,9 +395,7 @@ def _read_header(fs: AbstractFileSystem, file: TomocubeFile) -> _FileHeader:
                 )
                 if contiguous:
                     planes.append(
-                        _PlaneLocation(
-                            index, int(page.dataoffsets[0]), expected_nbytes
-                        )
+                        _PlaneLocation(index, int(page.dataoffsets[0]), expected_nbytes)
                     )
                 else:
                     planes.append(_PlaneLocation(index, -1, 0))
@@ -417,18 +432,26 @@ def _read_header(fs: AbstractFileSystem, file: TomocubeFile) -> _FileHeader:
 
 class _SceneInfo(NamedTuple):
     scene: str
-    headers: Tuple[_FileHeader, ...]  # one per timepoint
-    size_z: Optional[int]  # ``None`` for 2-D scenes (dims ``TYX``)
+    channels: Tuple[str, ...]
+    timepoints: Tuple[Optional[int], ...]
+    headers: Tuple[Tuple[_FileHeader, ...], ...]  # indexed ``[t][c]``
+    size_z: Optional[int]  # ``None`` for 2-D scenes (dims ``TCYX``)
     size_y: int
     size_x: int
     dtype: np.dtype  # dtype of the *returned* array
-    scale: Optional[float]  # multiply raw values by this (RI conversion)
+    scales: Tuple[Optional[float], ...]  # per channel; multiply raw values
     pixel_sizes: types.PhysicalPixelSizes
     z_spacing_source: Optional[str]
     time_interval: Optional[timedelta]
 
+    @property
+    def datetimes(self) -> Tuple[Optional[datetime], ...]:
+        """One acquisition time per T (from the HT channel when present)."""
+        c_idx = self.channels.index(HT_CHANNEL) if HT_CHANNEL in self.channels else 0
+        return tuple(row[c_idx].datetime for row in self.headers)
 
-def _mean_interval(datetimes: Tuple[Optional[datetime], ...]) -> Optional[timedelta]:
+
+def _mean_interval(datetimes: Sequence[Optional[datetime]]) -> Optional[timedelta]:
     if len(datetimes) < 2 or any(dt is None for dt in datetimes):
         return None
     first, last = datetimes[0], datetimes[-1]
@@ -436,77 +459,139 @@ def _mean_interval(datetimes: Tuple[Optional[datetime], ...]) -> Optional[timede
     return (last - first) / (len(datetimes) - 1)
 
 
-def _build_scene_info(
-    scene: str,
-    headers: Tuple[_FileHeader, ...],
-    all_headers: Dict[str, Tuple[_FileHeader, ...]],
-    refractive_index: bool,
-) -> _SceneInfo:
-    first = headers[0]
-    for header in headers[1:]:
-        same = (
-            header.n_pages == first.n_pages
-            and header.size_y == first.size_y
-            and header.size_x == first.size_x
-            and header.dtype == first.dtype
-        )
-        if not same:
-            raise exceptions.UnsupportedFileFormatError(
-                "bioio-tomocube",
-                header.file.path,
-                f"Timepoints of scene {scene!r} differ in shape or dtype "
-                f"({header.n_pages}x{header.size_y}x{header.size_x} "
-                f"{header.dtype} vs {first.n_pages}x{first.size_y}x"
-                f"{first.size_x} {first.dtype}).",
-            )
+def _tp_sort_key(tp: Optional[int]) -> Tuple[bool, int]:
+    return (tp is None, tp or 0)
 
+
+def _build_scene_info(
+    scene: str, headers: Sequence[_FileHeader], refractive_index: bool
+) -> _SceneInfo:
+    """Combine one scene's files (all channels, all timepoints) into a grid.
+
+    All *headers* must share the same pixel grid; callers guarantee this via
+    :func:`_group_by_grid`.  Channels are the union over timepoints; only
+    timepoints at which **every** channel is present are kept.
+    """
+    channels = tuple(
+        sorted({h.file.channel_name for h in headers}, key=_channel_sort_key)
+    )
+    by_tp: Dict[Optional[int], Dict[str, _FileHeader]] = {}
+    for header in headers:
+        by_tp.setdefault(header.file.timepoint, {})[header.file.channel_name] = header
+
+    complete = [tp for tp, chans in by_tp.items() if set(chans) == set(channels)]
+    dropped = sorted((tp for tp in by_tp if tp not in complete), key=_tp_sort_key)
+    if not complete:
+        raise exceptions.UnsupportedFileFormatError(
+            "bioio-tomocube",
+            headers[0].file.path,
+            f"Scene {scene!r}: no timepoint has all channels {channels}.",
+        )
+    if dropped:
+        log.warning(
+            "Scene %s: dropping timepoint(s) %s because not every channel %s "
+            "was exported for them.",
+            scene,
+            dropped,
+            channels,
+        )
+    timepoints = tuple(sorted(complete, key=_tp_sort_key))
+    grid = tuple(tuple(by_tp[tp][c] for c in channels) for tp in timepoints)
+
+    first = grid[0][0]
     modality = first.file.modality
     is_volume = modality in _VOLUME_MODALITIES or first.n_pages > 1
     size_z: Optional[int] = first.n_pages if is_volume else None
 
-    scale: Optional[float] = None
+    scales = tuple(
+        RI_SCALE if (refractive_index and c == HT_CHANNEL) else None for c in channels
+    )
     out_dtype = first.dtype.newbyteorder("=")
-    if refractive_index and first.file.is_ht:
-        scale = RI_SCALE
+    if any(s is not None for s in scales):
         out_dtype = np.dtype(np.float32)
 
-    # Z spacing: FL3D headers carry the *pre-resampling* FL spacing even though
-    # the pages are on the HT grid.  Prefer the HT3D sibling's spacing when the
-    # page counts agree.
-    z_spacing = first.z_spacing if is_volume else None
-    z_source: Optional[str] = "ImageJ header" if z_spacing is not None else None
-    if is_volume and not first.file.is_ht:
-        ht_headers = all_headers.get("3D")
-        if ht_headers:
-            ht_by_tp = {h.file.timepoint: h for h in ht_headers}
-            ht = ht_by_tp.get(first.file.timepoint, ht_headers[0])
-            if ht.n_pages == first.n_pages and ht.z_spacing is not None:
-                if z_spacing is not None and not np.isclose(z_spacing, ht.z_spacing):
+    # Z spacing: prefer the HT header.  FL3D headers carry the pre-resampling
+    # FL spacing even though the pages are on the HT grid.
+    z_spacing: Optional[float] = None
+    z_source: Optional[str] = None
+    if is_volume:
+        ht = next((h for h in grid[0] if h.file.is_ht), None)
+        if ht is not None and ht.z_spacing is not None:
+            z_spacing, z_source = ht.z_spacing, "HT header"
+            for other in grid[0]:
+                if (
+                    other is not ht
+                    and other.z_spacing is not None
+                    and not np.isclose(other.z_spacing, ht.z_spacing)
+                ):
                     log.info(
-                        "Scene %s: ImageJ header Z spacing %.4f µm differs from "
-                        "the HT3D grid (%.4f µm) the pages are stored on; "
-                        "using the HT3D spacing.",
+                        "Scene %s channel %s: ImageJ header Z spacing %.4f µm "
+                        "differs from the HT grid (%.4f µm) the pages are stored "
+                        "on; using the HT spacing.",
                         scene,
-                        z_spacing,
+                        other.file.channel_name,
+                        other.z_spacing,
                         ht.z_spacing,
                     )
-                z_spacing = ht.z_spacing
-                z_source = "HT3D sibling"
+        else:
+            fallback = next((h for h in grid[0] if h.z_spacing is not None), None)
+            if fallback is not None:
+                z_spacing, z_source = fallback.z_spacing, "ImageJ header"
 
-    return _SceneInfo(
+    info = _SceneInfo(
         scene=scene,
-        headers=headers,
+        channels=channels,
+        timepoints=timepoints,
+        headers=grid,
         size_z=size_z,
         size_y=first.size_y,
         size_x=first.size_x,
         dtype=out_dtype,
-        scale=scale,
+        scales=scales,
         pixel_sizes=types.PhysicalPixelSizes(
             Z=z_spacing, Y=first.pixel_size_y, X=first.pixel_size_x
         ),
         z_spacing_source=z_source,
-        time_interval=_mean_interval(tuple(h.datetime for h in headers)),
+        time_interval=None,
     )
+    return info._replace(time_interval=_mean_interval(info.datetimes))
+
+
+def _group_by_grid(
+    scene: str, headers: Sequence[_FileHeader]
+) -> Dict[str, List[_FileHeader]]:
+    """Split a scene's files into groups that can share one array.
+
+    Normally every modality of an export sits on the same grid and a single
+    group named *scene* results.  If grids differ, each channel becomes its
+    own scene named ``"<scene>/<channel>"`` and a warning is logged.
+    """
+    grids = {h.grid for h in headers}
+    if len(grids) == 1:
+        return {scene: list(headers)}
+
+    by_channel: Dict[str, List[_FileHeader]] = {}
+    for header in headers:
+        by_channel.setdefault(header.file.channel_name, []).append(header)
+    log.warning(
+        "Scene %s: channels %s are not on a common pixel grid (%s); exposing "
+        "them as separate scenes instead of stacking along C.",
+        scene,
+        sorted(by_channel, key=_channel_sort_key),
+        sorted(grids),
+    )
+    result: Dict[str, List[_FileHeader]] = {}
+    for channel in sorted(by_channel, key=_channel_sort_key):
+        members = by_channel[channel]
+        if len({h.grid for h in members}) != 1:
+            raise exceptions.UnsupportedFileFormatError(
+                "bioio-tomocube",
+                members[0].file.path,
+                f"Channel {channel!r} of scene {scene!r} changes shape or dtype "
+                "between timepoints.",
+            )
+        result[f"{scene}/{channel}"] = members
+    return result
 
 
 def _parse_acquisition_name(base: str) -> Dict[str, Any]:
@@ -542,11 +627,11 @@ def _parse_acquisition_name(base: str) -> Dict[str, Any]:
 ###############################################################################
 
 
-def _to_output(arr: np.ndarray, scale: Optional[float]) -> np.ndarray:
+def _to_output(arr: np.ndarray, scale: Optional[float], dtype: np.dtype) -> np.ndarray:
     arr = np.ascontiguousarray(arr, dtype=arr.dtype.newbyteorder("="))
     if scale is not None:
-        return arr.astype(np.float32) * np.float32(scale)
-    return arr
+        arr = arr.astype(np.float32) * np.float32(scale)
+    return arr.astype(dtype, copy=False)
 
 
 def _read_plane(
@@ -554,23 +639,27 @@ def _read_plane(
     path: str,
     location: _PlaneLocation,
     shape: Tuple[int, int],
-    dtype: str,
+    stored_dtype: str,
     scale: Optional[float],
+    out_dtype: np.dtype,
 ) -> np.ndarray:
     """Read one Z plane; opens and closes the file (safe on dask workers)."""
     with fs.open(path, "rb") as fobj:
         if location.offset >= 0:
             fobj.seek(location.offset)
             buffer = fobj.read(location.nbytes)
-            arr = np.frombuffer(buffer, dtype=np.dtype(dtype)).reshape(shape)
+            arr = np.frombuffer(buffer, dtype=np.dtype(stored_dtype)).reshape(shape)
         else:
             with tifffile.TiffFile(fobj) as tif:
                 arr = tif.pages[location.page_index].asarray()
-    return _to_output(arr, scale)
+    return _to_output(arr, scale, out_dtype)
 
 
 def _read_volume(
-    fs: AbstractFileSystem, header: _FileHeader, scale: Optional[float]
+    fs: AbstractFileSystem,
+    header: _FileHeader,
+    scale: Optional[float],
+    out_dtype: np.dtype,
 ) -> np.ndarray:
     """Read every page of one file with a single open; returns ``ZYX``."""
     shape = (header.size_y, header.size_x)
@@ -592,7 +681,7 @@ def _read_volume(
         finally:
             if tif is not None:
                 tif.close()
-    return _to_output(np.stack(planes, axis=0), scale)
+    return _to_output(np.stack(planes, axis=0), scale, out_dtype)
 
 
 ###############################################################################
@@ -614,20 +703,24 @@ class TiffReader(Reader):
         When ``True``, every ``<base>.TPnn`` timepoint found next to *image*
         is stacked along ``T``.  Default: ``False`` (single timepoint, T=1).
     refractive_index : bool
-        When ``True`` the ``3D``/``2DMIP`` scenes are returned as ``float32``
-        refractive index (raw ``uint16`` × ``1e-4``).  Default: ``False``
-        (raw ``uint16`` as stored).
+        When ``True`` the ``HT`` channel is converted to refractive index
+        (raw ``uint16`` × ``1e-4``) and the whole scene is returned as
+        ``float32``.  Default: ``False`` (raw ``uint16`` as stored).
 
     Notes
     -----
-    Scenes mirror the TCF reader:
+    The export places every modality on one pixel grid, so modalities become
+    **channels** rather than separate scenes:
 
-    * ``"3D"`` — refractive-index volume (``TZYX``)
-    * ``"2DMIP"`` — refractive-index max projection (``TYX``), if exported
-    * ``"3DFL/CH0"``, ``"3DFL/CH1"``, … — fluorescence volumes (``TZYX``)
-    * ``"2DFLMIP/CH0"``, … — fluorescence max projections (``TYX``)
+    * ``"3D"`` — ``TCZYX``; channels ``HT``, ``FL_CH0``, ``FL_CH1``, …
+    * ``"2DMIP"`` — ``TCYX`` max projections with the same channel naming,
+      present when ``HT2D``/``FL2D`` files were exported
 
-    The default scene is the one matching the file passed as *image*.
+    Only timepoints at which every channel of a scene exists are kept; others
+    are dropped with a warning.  Should an export ever place modalities on
+    different grids they are exposed as ``"3D/HT"``, ``"3D/FL_CH0"``, … instead.
+
+    The default scene is the one containing the file passed as *image*.
     """
 
     _physical_pixel_sizes: Optional[types.PhysicalPixelSizes]
@@ -658,7 +751,9 @@ class TiffReader(Reader):
                 "bioio-tomocube", path, f"Not a readable TIFF file: {err}"
             )
         lowered = software.lower()
-        if not (model.upper().startswith("HT") or "tomo" in lowered or "htx" in lowered):
+        if not (
+            model.upper().startswith("HT") or "tomo" in lowered or "htx" in lowered
+        ):
             raise exceptions.UnsupportedFileFormatError(
                 "bioio-tomocube",
                 path,
@@ -690,50 +785,69 @@ class TiffReader(Reader):
         self._timelapse = timelapse
         self._refractive_index = refractive_index
 
-        self._files: Optional[Dict[str, List[TomocubeFile]]] = None
-        self._scenes: Optional[Tuple[str, ...]] = None
         self._acquisition: Optional[Dict[str, _SceneInfo]] = None
+        self._scenes: Optional[Tuple[str, ...]] = None
         self._ome: Optional[OME] = None
 
-        # Default to the scene of the file that was actually passed in.
-        self._current_scene_index = self.scenes.index(self._anchor.scene)
+        # Default to the scene containing the file that was actually passed in.
+        self._current_scene_index = self.scenes.index(self._anchor_scene())
 
     # ------------------------------------------------------------------
     # Discovery / caching
     # ------------------------------------------------------------------
 
-    @property
-    def files(self) -> Dict[str, List[TomocubeFile]]:
-        """Scene name → files (one per timepoint) discovered for this image."""
-        if self._files is None:
-            self._files = discover_acquisition(
+    def _load_acquisition(self) -> Dict[str, _SceneInfo]:
+        """Discover files, parse every header once and assemble the scenes."""
+        if self._acquisition is None:
+            files = discover_acquisition(
                 self._fs, self._path, timelapse=self._timelapse
             )
-        return self._files
+            headers = [_read_header(self._fs, f) for f in files]
+            by_scene: Dict[str, List[_FileHeader]] = {}
+            for header in headers:
+                by_scene.setdefault(header.file.scene, []).append(header)
+
+            acquisition: Dict[str, _SceneInfo] = {}
+            for scene in sorted(by_scene, key=_scene_sort_key):
+                for name, members in _group_by_grid(scene, by_scene[scene]).items():
+                    acquisition[name] = _build_scene_info(
+                        name, members, self._refractive_index
+                    )
+            self._acquisition = acquisition
+        return self._acquisition
+
+    def _anchor_scene(self) -> str:
+        """Name of the scene that contains the file passed to the constructor."""
+        anchor_name = _basename(self._path)
+        for name, info in self._load_acquisition().items():
+            for row in info.headers:
+                if any(_basename(h.file.path) == anchor_name for h in row):
+                    return name
+        # Anchor timepoint may have been dropped; fall back to its scene group.
+        candidates = [
+            s for s in self.scenes if s.split("/", 1)[0] == self._anchor.scene
+        ]
+        return candidates[0] if candidates else self.scenes[0]
 
     @property
     def scenes(self) -> Tuple[str, ...]:
         if self._scenes is None:
-            self._scenes = tuple(self.files.keys())
+            self._scenes = tuple(self._load_acquisition().keys())
         return self._scenes
-
-    def _load_acquisition(self) -> Dict[str, _SceneInfo]:
-        """Parse every discovered file's header once and cache per scene."""
-        if self._acquisition is None:
-            headers: Dict[str, Tuple[_FileHeader, ...]] = {
-                scene: tuple(_read_header(self._fs, f) for f in members)
-                for scene, members in self.files.items()
-            }
-            self._acquisition = {
-                scene: _build_scene_info(
-                    scene, hdrs, headers, self._refractive_index
-                )
-                for scene, hdrs in headers.items()
-            }
-        return self._acquisition
 
     def _scene_info(self) -> _SceneInfo:
         return self._load_acquisition()[self.current_scene]
+
+    @property
+    def files(self) -> Dict[str, Dict[str, List[TomocubeFile]]]:
+        """``scene → channel → files`` (one per timepoint) backing this image."""
+        result: Dict[str, Dict[str, List[TomocubeFile]]] = {}
+        for name, info in self._load_acquisition().items():
+            result[name] = {
+                channel: [row[c_idx].file for row in info.headers]
+                for c_idx, channel in enumerate(info.channels)
+            }
+        return result
 
     # ------------------------------------------------------------------
     # Array construction
@@ -742,33 +856,37 @@ class TiffReader(Reader):
     def _build_xarray(self, delayed: bool) -> xr.DataArray:
         info = self._scene_info()
         plane_shape = (info.size_y, info.size_x)
-        dim_names = [DimensionNames.Time] + list(
-            _SPATIAL_DIMS[-(3 if info.size_z is not None else 2) :]
-        )
+        dim_names = [DimensionNames.Time, DimensionNames.Channel]
+        if info.size_z is not None:
+            dim_names.append(DimensionNames.SpatialZ)
+        dim_names += [DimensionNames.SpatialY, DimensionNames.SpatialX]
 
         array_data: Any
         if delayed:
             timepoints: List[da.Array] = []
-            for header in info.headers:
-                planes = [
-                    da.from_delayed(
-                        dask.delayed(_read_plane)(
-                            self._fs,
-                            header.file.path,
-                            location,
-                            plane_shape,
-                            header.dtype.str,
-                            info.scale,
-                        ),
-                        shape=plane_shape,
-                        dtype=info.dtype,
+            for row in info.headers:
+                channels: List[da.Array] = []
+                for header, scale in zip(row, info.scales):
+                    planes = [
+                        da.from_delayed(
+                            dask.delayed(_read_plane)(
+                                self._fs,
+                                header.file.path,
+                                location,
+                                plane_shape,
+                                header.dtype.str,
+                                scale,
+                                info.dtype,
+                            ),
+                            shape=plane_shape,
+                            dtype=info.dtype,
+                        )
+                        for location in header.planes
+                    ]
+                    channels.append(
+                        planes[0] if info.size_z is None else da.stack(planes, axis=0)
                     )
-                    for location in header.planes
-                ]
-                if info.size_z is None:
-                    timepoints.append(planes[0])
-                else:
-                    timepoints.append(da.stack(planes, axis=0))
+                timepoints.append(da.stack(channels, axis=0))
             array_data = da.stack(timepoints, axis=0)
             log.debug(
                 "scene=%r shape=%s chunks=%s",
@@ -777,16 +895,21 @@ class TiffReader(Reader):
                 array_data.chunks,
             )
         else:
-            volumes = [
-                _read_volume(self._fs, header, info.scale) for header in info.headers
-            ]
-            if info.size_z is None:
-                volumes = [v[0] for v in volumes]
-            array_data = np.stack(volumes, axis=0)
+            timepoint_arrays: List[np.ndarray] = []
+            for row in info.headers:
+                volumes = [
+                    _read_volume(self._fs, header, scale, info.dtype)
+                    for header, scale in zip(row, info.scales)
+                ]
+                if info.size_z is None:
+                    volumes = [v[0] for v in volumes]
+                timepoint_arrays.append(np.stack(volumes, axis=0))
+            array_data = np.stack(timepoint_arrays, axis=0)
 
         return xr.DataArray(
             array_data,
             dims=dim_names,
+            coords={DimensionNames.Channel: list(info.channels)},
             attrs={
                 constants.METADATA_UNPROCESSED: self.tiff_metadata,
                 constants.METADATA_PROCESSED: self.ome_metadata,
@@ -808,6 +931,10 @@ class TiffReader(Reader):
         return self._scene_info().dtype
 
     @property
+    def channel_names(self) -> Optional[List[str]]:
+        return list(self._scene_info().channels)
+
+    @property
     def tiff_metadata(self) -> Dict[str, Any]:
         """Raw TIFF/ImageJ metadata and file provenance for the current scene.
 
@@ -815,37 +942,46 @@ class TiffReader(Reader):
 
             {
                 "format": "tomocube-tiff",
-                "scene": "3DFL/CH0",
-                "files": [...],            # one path per timepoint
-                "timepoints": [...],       # TP index per file, or None
-                "acquisition": {...},      # parsed from the file name
-                "tags": {...},             # TIFF tags of the first page
-                "imagej": {...},           # parsed ImageJ description
-                "z_spacing_source": "HT3D sibling" | "ImageJ header" | None,
-                "refractive_index_scale": 1e-4 | None,
+                "scene": "3D",
+                "channels": ["HT", "FL_CH0", "FL_CH1"],
+                "timepoints": [1, 2, ...],          # TP index per T, or None
+                "files": {"HT": [...], "FL_CH0": [...], ...},  # one per T
+                "acquisition": {...},               # parsed from the file name
+                "tags": {"HT": {...}, ...},         # TIFF tags, first page, T=0
+                "imagej": {"HT": {...}, ...},       # parsed ImageJ description
+                "z_spacing_source": "HT header" | "ImageJ header" | None,
+                "refractive_index_scale": {"HT": 1e-4, "FL_CH0": None, ...},
             }
         """
         info = self._scene_info()
-        first = info.headers[0]
-        acquisition = _parse_acquisition_name(first.file.base)
-        acquisition.update(
-            {
-                "stem": first.file.stem,
-                "modality": first.file.modality,
-                "channel": first.file.channel,
-                "suffix": first.file.suffix,
-            }
-        )
+        first_row = info.headers[0]
+        acquisition = _parse_acquisition_name(first_row[0].file.base)
+        acquisition["stem"] = first_row[0].file.stem
+        acquisition["suffix"] = first_row[0].file.suffix
+        acquisition["modalities"] = {
+            channel: header.file.modality
+            for channel, header in zip(info.channels, first_row)
+        }
         return {
             "format": "tomocube-tiff",
             "scene": info.scene,
-            "files": [h.file.path for h in info.headers],
-            "timepoints": [h.file.timepoint for h in info.headers],
+            "channels": list(info.channels),
+            "timepoints": list(info.timepoints),
+            "files": {
+                channel: [row[c_idx].file.path for row in info.headers]
+                for c_idx, channel in enumerate(info.channels)
+            },
             "acquisition": acquisition,
-            "tags": dict(first.tags),
-            "imagej": dict(first.imagej),
+            "tags": {
+                channel: dict(header.tags)
+                for channel, header in zip(info.channels, first_row)
+            },
+            "imagej": {
+                channel: dict(header.imagej)
+                for channel, header in zip(info.channels, first_row)
+            },
             "z_spacing_source": info.z_spacing_source,
-            "refractive_index_scale": info.scale,
+            "refractive_index_scale": dict(zip(info.channels, info.scales)),
         }
 
     @property
@@ -853,30 +989,22 @@ class TiffReader(Reader):
         """OME metadata with one ``Image`` per scene (aligned with ``scenes``)."""
         if self._ome is None:
             acquisition = self._load_acquisition()
-            ome_scenes: List[TiffOmeScene] = []
-            for scene in self.scenes:
-                info = acquisition[scene]
-                first = info.headers[0]
-                channel_name = (
-                    "HT"
-                    if first.file.is_ht
-                    else f"FL CH{first.file.channel or 0}"
+            ome_scenes = [
+                TiffOmeScene(
+                    name=scene,
+                    size_x=info.size_x,
+                    size_y=info.size_y,
+                    size_z=info.size_z or 1,
+                    size_t=len(info.headers),
+                    dtype=info.dtype,
+                    pixel_sizes=info.pixel_sizes,
+                    datetimes=info.datetimes,
+                    channel_names=info.channels,
+                    title=info.headers[0][0].file.stem,
                 )
-                ome_scenes.append(
-                    TiffOmeScene(
-                        name=scene,
-                        size_x=info.size_x,
-                        size_y=info.size_y,
-                        size_z=info.size_z or 1,
-                        size_t=len(info.headers),
-                        dtype=info.dtype,
-                        pixel_sizes=info.pixel_sizes,
-                        datetimes=tuple(h.datetime for h in info.headers),
-                        channel_name=channel_name,
-                        title=first.file.stem,
-                    )
-                )
-            first_header = acquisition[self.scenes[0]].headers[0]
+                for scene, info in ((s, acquisition[s]) for s in self.scenes)
+            ]
+            first_header = acquisition[self.scenes[0]].headers[0][0]
             self._ome = build_tiff_ome(
                 ome_scenes,
                 model=str(first_header.tags.get("Model", "")) or None,
@@ -900,8 +1028,7 @@ class TiffReader(Reader):
     @property
     def standard_metadata(self) -> StandardMetadata:
         sm = super().standard_metadata
-        info = self._scene_info()
-        first = info.headers[0]
+        first = self._scene_info().headers[0][0]
         acquisition = _parse_acquisition_name(first.file.base)
         if "row" in acquisition:
             sm.row = acquisition["row"]
