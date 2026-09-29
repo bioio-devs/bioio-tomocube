@@ -1,65 +1,112 @@
-# Contributing to bioio-tomocube
+# Contributing
 
-## Prerequisites
+Contributions are welcome, and they are greatly appreciated! Every little bit
+helps, and credit will always be given.
 
-**Git LFS** must be installed before you clone. Test resources (`.TCF` sample
-files) are stored in LFS. Cloning without LFS causes those files to appear as
-text pointer stubs and all fixture-dependent tests to fail.
+## Developer Installation
 
-Install Git LFS: https://git-lfs.github.com/
+If something goes wrong at any point during installing the library please see how
+[our CI/CD on GitHub Actions](.github/workflows/build-main.yml) installs and builds the
+project as it will always be the most up-to-date.
 
-**just** is used as the task runner: https://just.systems/
+## Test Resources and Git LFS
 
-## Setting Up a Development Environment
+ This project uses Git Large File Storage (LFS) to store large test resources under /tests/resources/.
+ Before cloning, make sure you have Git LFS installed:
+
+ ### macOS
+ ```
+ brew install git-lfs
+ git lfs install
+ ```
+
+ ### Debian/Ubuntu
+ ```
+ sudo apt-get install git-lfs
+ git lfs install
+ ```
+
+ ### Or install manually: https://git-lfs.github.com/
+
+ ⚠️ If you skip git lfs install, large files will appear as plain-text pointers and your tests may fail.
+ 
+## Get Started!
+
+Ready to contribute? Here's how to set up `bioio-tomocube` for local development.
+
+1. Fork the `bioio-tomocube` repo on GitHub.
+
+2. Clone your fork locally:
+
+    ```bash
+    git clone git@github.com:{your_name_here}/bioio-tomocube.git
+    ```
+
+3. Install the project in editable mode. (It is also recommended to work in a virtualenv or anaconda environment):
+
+    ```bash
+    cd bioio-tomocube/
+    just setup-dev
+    ```
+
+4. Create a branch for local development:
+
+    ```bash
+    git checkout -b {your_development_type}/short-description
+    ```
+
+    Ex: feature/read-tiff-files or bugfix/handle-file-not-found<br>
+    Now you can make your changes locally.
+
+5. When you're done making changes, check that your changes pass linting and
+   tests with [just](https://github.com/casey/just):
+
+    ```bash
+    just build
+    ```
+
+6. Commit your changes and push your branch to GitHub:
+
+    ```bash
+    git add .
+    git commit -m "Your detailed description of your changes."
+    git push origin {your_development_type}/short-description
+    ```
+
+7. Submit a pull request through the GitHub website.
+
+## Just Commands
+
+For development commands we use [just](https://github.com/casey/just).
 
 ```bash
-git clone git@github.com:bioio-devs/bioio-tomocube.git
-cd bioio-tomocube
-just setup-dev
+just
+```
+```
+Available recipes:
+    build                    # run lint and then run tests
+    clean                    # clean all build, python, and lint files
+    default                  # list all available commands
+    install                  # install with all deps
+    lint                     # lint, format, and check all files
+    release                  # release a new version
+    tag-for-release version  # tag a new version
+    test                     # run tests
+    update-from-cookiecutter # update this repo using latest cookiecutter-bioio-reader
 ```
 
-`just setup-dev` runs `pip install -e .[lint,test]` and installs the
-pre-commit hooks.
+## Deploying
 
-## Available Commands
-
-| Command | Description |
-|---|---|
-| `just build` | Run lint then tests (mirrors CI) |
-| `just test` | Run pytest with coverage |
-| `just lint` | Run pre-commit on all files |
-| `just benchmark` | Run read-performance benchmarks; writes `output.csv` |
-| `just clean` | Remove build artefacts |
-| `just install` | Install runtime + lint + test dependencies |
-
-## Making Changes
-
-1. Fork the repository and clone your fork.
-2. Create a feature branch: `git checkout -b feat/short-description`.
-3. Make your changes.
-4. Validate locally: `just build`.
-5. Commit and push to your fork.
-6. Open a pull request against `main`.
-
-## Test Fixtures
-
-The `.TCF` files in `bioio_tomocube/tests/resources/` are real acquisitions from
-an Allen HT-X1 Plus (the 2025 microscope demo on the Allen network), cropped to a
-64 × 64 window with the first few frames kept and every HDF5 attribute preserved.
-They cover a single-frame capture with two fluorescence channels, a timelapse,
-and an acquisition whose modalities have different frame counts. They are
-tracked by Git LFS, so run `git lfs pull` after cloning.
-
-Contributors cannot add fixtures through a pull request; the file must be
-committed to LFS by a maintainer. Open an issue describing the acquisition
-type the new fixture would cover.
-
-## Release Process (Maintainers Only)
+A reminder for the maintainers on how to deploy.
+Make sure the main branch is checked out and all desired changes
+are merged. Then run:
 
 ```bash
-just tag-for-release vX.Y.Z
+just tag-for-release "vX.Y.Z"
 just release
 ```
 
-A tag beginning with `v` triggers the automated PyPI publish via CI. Version
-numbers are managed by `setuptools-scm` and derived from the git tag.
+The presence of a tag starting with "v" will trigger the `publish` step in the
+main github workflow, which will build the package and upload it to PyPI. The
+version will be injected into the package metadata by
+[`setuptools-scm`](https://github.com/pypa/setuptools_scm)

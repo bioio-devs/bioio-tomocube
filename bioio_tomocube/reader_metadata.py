@@ -13,7 +13,7 @@ class ReaderMetadata(bioio_base.reader_metadata.ReaderMetadata):
 
     @staticmethod
     def get_supported_extensions() -> List[str]:
-        return [".TCF"]
+        return [".TCF", ".tcf"]
 
     @staticmethod
     def get_reader() -> bioio_base.reader.Reader:

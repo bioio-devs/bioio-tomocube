@@ -1,5 +1,3 @@
-"""HDF5 attribute helpers and OME metadata for TCF files."""
-
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 

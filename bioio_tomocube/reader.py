@@ -1,5 +1,3 @@
-"""Reader for Tomocube TCF (HDF5) holotomography files."""
-
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 import dask
@@ -42,11 +40,6 @@ def _read_frame(
 class Reader(BaseReader):
     """Read Tomocube ``.TCF`` files.
 
-    Each ``Data/`` group is a scene: ``3D`` and ``2DMIP`` for refractive index,
-    ``3DFL/CHn`` and ``2DFLMIP/CHn`` per fluorescence channel. Scene names are the
-    HDF5 paths under ``Data/``. Pixel values are the stored integers as
-    ``float32``; refractive-index scenes hold RI x 10 000.
-
     Parameters
     ----------
     image : Path or str
@@ -74,7 +67,7 @@ class Reader(BaseReader):
         self._is_supported_image(self._fs, self._path)
         self._scenes: Optional[Tuple[str, ...]] = None
         self._scene_info: Optional[_SceneInfo] = None
-        self._ome: Optional[OME] = None  # scene-independent, built once
+        self._ome: Optional[OME] = None
 
     def _reset_self(self) -> None:
         super()._reset_self()
@@ -90,7 +83,7 @@ class Reader(BaseReader):
                         continue
                     children = list(group.values())
                     if children and isinstance(children[0], h5py.Group):
-                        found.extend(f"{name}/{ch}" for ch in group)  # per channel
+                        found.extend(f"{name}/{ch}" for ch in group)
                     else:
                         found.append(name)
             self._scenes = tuple(found)
@@ -186,12 +179,6 @@ class Reader(BaseReader):
         return self._ome
 
     @property
-    def tcf_metadata(self) -> Dict[str, Any]:
-        """HDF5 attributes: ``root``, ``scene`` (modality group), ``channel``
-        (fluorescence channel group, when present) and ``info`` (``Info/*``)."""
-        return self._load_scene_info().tcf_metadata
-
-    @property
     def physical_pixel_sizes(self) -> types.PhysicalPixelSizes:
         return self._load_scene_info().pixel_sizes
 
@@ -201,11 +188,9 @@ class Reader(BaseReader):
         info = self._load_scene_info()
         metadata.stage_position_x = info.stage_x
         metadata.stage_position_y = info.stage_y
-        # Acquisition start is the earliest frame of any scene, not scene 0's.
         images = self.ome_metadata.images
         starts = [i.acquisition_date for i in images if i.acquisition_date]
         metadata.imaging_datetime = min(starts) if starts else None
-        # bioio-base renders "<mag>x/<NA>", and the file has no objective NA.
         magnification = info.tcf_metadata["info"].get("Device", {}).get("Magnification")
         metadata.objective = f"{round(magnification)}x" if magnification else None
         return metadata
