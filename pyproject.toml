@@ -13,7 +13,7 @@ name = "bioio-tomocube"
 description = "A BioIO reader plugin for Tomocube TCF holotomography files."
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT License" }
+license = { text = "BSD-3-Clause" }
 authors = [
   { email = "brian.whitney@alleninstitute.org", name = "bioio-devs" },
 ]
