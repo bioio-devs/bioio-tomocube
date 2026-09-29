@@ -87,9 +87,7 @@ use_parentheses = true
 ignore = [
   ".pre-commit-config.yaml",
   "CONTRIBUTING.md",
-  "HANDOFF.md",
   "Justfile",
-  "docs/**",
   "scripts/**",
 ]
 

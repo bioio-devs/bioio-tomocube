@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """Tests against real TCF files from the HT-X1 Plus demo, cropped to 64 x 64 XY
-by ``scripts/make_fixtures.py`` with every attribute preserved."""
+with every attribute preserved."""
 
 from datetime import datetime, timedelta
 

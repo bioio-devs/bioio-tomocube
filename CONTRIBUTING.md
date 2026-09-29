@@ -44,10 +44,11 @@ pre-commit hooks.
 ## Test Fixtures
 
 The `.TCF` files in `bioio_tomocube/tests/resources/` are real acquisitions from
-an Allen HT-X1 Plus, cropped to a 64 × 64 window with the first few frames kept
-and every HDF5 attribute preserved. `scripts/make_fixtures.py` regenerates them
-from the source files on the Allen network; `HANDOFF.md` lists what each one
-covers. They are tracked by Git LFS, so run `git lfs pull` after cloning.
+an Allen HT-X1 Plus (the 2025 microscope demo on the Allen network), cropped to a
+64 × 64 window with the first few frames kept and every HDF5 attribute preserved.
+They cover a single-frame capture with two fluorescence channels, a timelapse,
+and an acquisition whose modalities have different frame counts. They are
+tracked by Git LFS, so run `git lfs pull` after cloning.
 
 Contributors cannot add fixtures through a pull request; the file must be
 committed to LFS by a maintainer. Open an issue describing the acquisition

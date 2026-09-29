@@ -82,6 +82,5 @@ first_frame = rdr.xarray_dask_data[0].compute()
 
 ## Development
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Test fixtures are real instrument files cropped
-to 64 × 64 pixels (`scripts/make_fixtures.py`) and tracked with Git LFS: run
+See [CONTRIBUTING.md](CONTRIBUTING.md). Test fixtures are tracked with Git LFS: run
 `git lfs pull` before `just test`.
