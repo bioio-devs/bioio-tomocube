@@ -14,7 +14,5 @@ __email__ = "brian.whitney@alleninstitute.org"
 
 from .reader import Reader
 from .reader_metadata import ReaderMetadata
-from .tcf_reader import TCFReader
-from .tiff_reader import TiffReader
 
-__all__ = ["Reader", "ReaderMetadata", "TCFReader", "TiffReader"]
+__all__ = ["Reader", "ReaderMetadata"]

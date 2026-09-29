@@ -1,8 +1,12 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
+"""Tests against real TCF files from the HT-X1 Plus demo, cropped to 64 x 64 XY
+by ``scripts/make_fixtures.py`` with every attribute preserved."""
+
 from datetime import datetime, timedelta
 
+import h5py
 import numpy as np
 import pytest
 from bioio_base import exceptions, test_utilities
@@ -12,288 +16,187 @@ from bioio_tomocube import Reader
 
 from .conftest import LOCAL_RESOURCES_DIR
 
-_READER_PARAMS = [
-    (
-        "sample.TCF",
-        "3D",
-        ("2DMIP", "3D"),
-        (10, 208, 296, 296),
-        np.float32,
-        "TZYX",
-        None,
-        (0.190974358974359, 0.09551566211946805, 0.09551566211946805),
-    ),
-    (
-        "sample.TCF",
-        "2DMIP",
-        ("2DMIP", "3D"),
-        (10, 296, 296),
-        np.float32,
-        "TYX",
-        None,
-        (None, 0.09551566211946805, 0.09551566211946805),
-    ),
-    (
-        "mito_T008P01.TCF",
-        "2DFLMIP",
-        ("2DFLMIP", "2DMIP", "3D", "3DFL/CH0"),
-        (1, 1890, 1890),
-        np.float32,
-        "TYX",
-        None,
-        (None, 0.1217217817902565, 0.1217217817902565),
-    ),
-    (
-        "mito_T008P01.TCF",
-        "2DMIP",
-        ("2DFLMIP", "2DMIP", "3D", "3DFL/CH0"),
-        (1, 692, 692),
-        np.float32,
-        "TYX",
-        None,
-        (None, 0.33200404047966003, 0.33200404047966003),
-    ),
-    (
-        "mito_T008P01.TCF",
-        "3D",
-        ("2DFLMIP", "2DMIP", "3D", "3DFL/CH0"),
-        (1, 132, 692, 692),
-        np.float32,
-        "TZYX",
-        None,
-        (1.1029136180877686, 0.33200404047966003, 0.33200404047966003),
-    ),
-    (
-        "mito_T008P01.TCF",
-        "3DFL/CH0",
-        ("2DFLMIP", "2DMIP", "3D", "3DFL/CH0"),
-        (1, 65, 1890, 1890),
-        np.float32,
-        "TZYX",
-        None,
-        (1.0416406393051147, 0.1217217817902565, 0.1217217817902565),
-    ),
-]
+# One frame, HT + two FL channels (CH0 stored uint8, CH1 uint16).
+SNAPSHOT = "251003.112316.6 Well Mito.018.Group1.A1.TP01.TCF"
+# First 3 of 16 timelapse frames, 60 s apart.
+TIMELAPSE = "251003.104445.6 Well Mito.003.Group1.A1.T001P01.TCF"
+# FL acquired every third HT frame: 4 HT frames, 2 FL frames.
+MIXED_T = "251006.162843.myosin 24well plate.005.Group8.C5.T001P02.TCF"
 
-_FILE_SCENE_PARAMS = [(p[0], p[1]) for p in _READER_PARAMS]
-
-
-# ---------------------------------------------------------------------------
-# Core reader checks — shape, dtype, dims, pixel sizes, metadata type
-# ---------------------------------------------------------------------------
+TWO_CHANNEL_SCENES = (
+    "2DFLMIP/CH0",
+    "2DFLMIP/CH1",
+    "2DMIP",
+    "3D",
+    "3DFL/CH0",
+    "3DFL/CH1",
+)
+ONE_CHANNEL_SCENES = ("2DFLMIP/CH0", "2DMIP", "3D", "3DFL/CH0")
+HT_PX = (0.874491274356842, 0.16256071627140045, 0.16256071627140045)
+FL_PX = (1.044531226158142, 0.1214757040143013, 0.1214757040143013)
+LOW_NA_HT_PX = (1.1059743165969849, 0.33200404047966003, 0.33200404047966003)
+LOW_NA_FL_PX = (1.044531226158142, 0.12126840651035309, 0.12126840651035309)
 
 
 @pytest.mark.parametrize(
-    "filename, set_scene, expected_scenes, expected_shape, expected_dtype, "
-    "expected_dims_order, expected_channel_names, expected_physical_pixel_sizes",
-    _READER_PARAMS,
+    "filename, scene, scenes, shape, dims, pixel_sizes",
+    [
+        (SNAPSHOT, "3D", TWO_CHANNEL_SCENES, (1, 70, 64, 64), "TZYX", HT_PX),
+        (SNAPSHOT, "3DFL/CH1", TWO_CHANNEL_SCENES, (1, 12, 64, 64), "TZYX", FL_PX),
+        (
+            SNAPSHOT,
+            "2DMIP",
+            TWO_CHANNEL_SCENES,
+            (1, 64, 64),
+            "TYX",
+            (None,) + HT_PX[1:],
+        ),
+        (
+            SNAPSHOT,
+            "2DFLMIP/CH1",
+            TWO_CHANNEL_SCENES,
+            (1, 64, 64),
+            "TYX",
+            (None,) + FL_PX[1:],
+        ),
+        (TIMELAPSE, "3D", TWO_CHANNEL_SCENES, (3, 70, 64, 64), "TZYX", HT_PX),
+        (MIXED_T, "3D", ONE_CHANNEL_SCENES, (4, 132, 64, 64), "TZYX", LOW_NA_HT_PX),
+        (
+            MIXED_T,
+            "3DFL/CH0",
+            ONE_CHANNEL_SCENES,
+            (2, 27, 64, 64),
+            "TZYX",
+            LOW_NA_FL_PX,
+        ),
+    ],
 )
-def test_reader(
-    filename,
-    set_scene,
-    expected_scenes,
-    expected_shape,
-    expected_dtype,
-    expected_dims_order,
-    expected_channel_names,
-    expected_physical_pixel_sizes,
-):
+def test_reader(filename, scene, scenes, shape, dims, pixel_sizes):
     test_utilities.run_image_file_checks(
         ImageContainer=Reader,
         image=LOCAL_RESOURCES_DIR / filename,
-        set_scene=set_scene,
-        expected_scenes=expected_scenes,
-        expected_current_scene=set_scene,
-        expected_shape=expected_shape,
-        expected_dtype=expected_dtype,
-        expected_dims_order=expected_dims_order,
-        expected_channel_names=expected_channel_names,
-        expected_physical_pixel_sizes=expected_physical_pixel_sizes,
+        set_scene=scene,
+        expected_scenes=scenes,
+        expected_current_scene=scene,
+        expected_shape=shape,
+        expected_dtype=np.float32,
+        expected_dims_order=dims,
+        expected_channel_names=None,
+        expected_physical_pixel_sizes=pixel_sizes,
         expected_metadata_type=OME,
         reader_kwargs={},
     )
 
 
-def test_unsupported_format():
-    """Non-TCF files must raise UnsupportedFileFormatError."""
+def test_unsupported_format(tmp_path):
+    path = tmp_path / "not_a_tcf.txt"
+    path.write_text("x")
     with pytest.raises(exceptions.UnsupportedFileFormatError):
-        Reader(LOCAL_RESOURCES_DIR / "unsupported.tif")
-
-
-# ---------------------------------------------------------------------------
-# Multi-scene cache invalidation
-# ---------------------------------------------------------------------------
+        Reader(path)
 
 
 def test_multi_scene():
-    """Scene switch must invalidate caches and return the correct data."""
     test_utilities.run_multi_scene_image_read_checks(
         ImageContainer=Reader,
-        image=LOCAL_RESOURCES_DIR / "sample.TCF",
+        image=LOCAL_RESOURCES_DIR / SNAPSHOT,
         first_scene_id="3D",
-        first_scene_shape=(10, 208, 296, 296),
-        first_scene_dtype=np.dtype("float32"),
-        second_scene_id="2DMIP",
-        second_scene_shape=(10, 296, 296),
-        second_scene_dtype=np.dtype("float32"),
+        first_scene_shape=(1, 70, 64, 64),
+        first_scene_dtype=np.dtype(np.float32),
+        second_scene_id="3DFL/CH0",
+        second_scene_shape=(1, 12, 64, 64),
+        second_scene_dtype=np.dtype(np.float32),
         allow_same_scene_data=False,
         reader_kwargs={},
     )
 
 
-# ---------------------------------------------------------------------------
-# OME metadata
-# ---------------------------------------------------------------------------
+def test_pixel_values_match_hdf5():
+    """Values are the stored integers cast to float32: HT is RI x 10 000."""
+    rdr = Reader(LOCAL_RESOURCES_DIR / SNAPSHOT)
+    with h5py.File(LOCAL_RESOURCES_DIR / SNAPSHOT, "r") as f:
+        for scene in ("3D", "3DFL/CH1", "2DFLMIP/CH0"):
+            rdr.set_scene(scene)
+            np.testing.assert_array_equal(rdr.data[0], f[f"Data/{scene}/000000"][()])
+    rdr.set_scene("3D")
+    assert 13_000 < rdr.data.min() < rdr.data.max() < 14_300
 
 
-@pytest.mark.parametrize("filename, scene", _FILE_SCENE_PARAMS)
-def test_ome_metadata_structure(filename, scene):
-    """OME must be an OME instance with one image per scene."""
-    rdr = Reader(LOCAL_RESOURCES_DIR / filename)
-    rdr.set_scene(scene)
+def test_ome_metadata():
+    rdr = Reader(LOCAL_RESOURCES_DIR / SNAPSHOT)
     ome = rdr.ome_metadata
-    assert isinstance(ome, OME)
-    assert len(ome.images) == len(rdr.scenes)
+    assert len(ome.images) == len(rdr.scenes) == 6
+    objective = ome.instruments[0].objectives[0]
+    assert (objective.nominal_magnification, objective.lens_na) == (40.0, 0.68)
+    assert ome.experimenters[0].user_name == "Default"
+
+    images = dict(zip(rdr.scenes, ome.images))
+    assert images["3D"].acquisition_date == datetime(2025, 10, 3, 11, 23, 50, 702000)
+    channel = images["3DFL/CH0"].pixels.channels[0]
+    assert channel.name == "CH0"
+    assert (channel.excitation_wavelength, channel.emission_wavelength) == (470, 525)
+    assert images["3DFL/CH1"].pixels.channels[0].excitation_wavelength == 555
 
 
-def test_ome_metadata_instrument():
-    """sample.TCF OME must carry objective magnification and NA."""
-    rdr = Reader(LOCAL_RESOURCES_DIR / "sample.TCF")
-    rdr.set_scene("3D")
-    obj = rdr.ome_metadata.instruments[0].objectives[0]
+def test_ome_planes_carry_frame_times():
+    rdr = Reader(LOCAL_RESOURCES_DIR / TIMELAPSE)
+    images = dict(zip(rdr.scenes, rdr.ome_metadata.images))
+    assert [p.delta_t for p in images["3D"].pixels.planes] == [0.0, 82.771, 165.632]
 
-    assert pytest.approx(obj.nominal_magnification, abs=0.01) == 58.33
-    assert pytest.approx(obj.lens_na, abs=0.001) == 1.2
-
-
-def test_ome_metadata_acquisition_date():
-    """sample.TCF OME acquisition_date must parse from CreateDate (2021)."""
-    rdr = Reader(LOCAL_RESOURCES_DIR / "sample.TCF")
-    rdr.set_scene("3D")
-    acq = rdr.ome_metadata.images[0].acquisition_date
-
-    assert isinstance(acq, datetime)
-    assert acq.year == 2021
-
-
-def test_ome_metadata_planes():
-    """sample.TCF Plane list must have delta_t=0 at T=0 and positive after."""
-    rdr = Reader(LOCAL_RESOURCES_DIR / "sample.TCF")
-    rdr.set_scene("3D")
-    planes = rdr.ome_metadata.images[0].pixels.planes
-
-    assert len(planes) == 10
-    assert planes[0].delta_t == 0.0
-    assert all(p.delta_t > 0.0 for p in planes[1:])
-
-
-# ---------------------------------------------------------------------------
-# Standard metadata
-# ---------------------------------------------------------------------------
+    rdr = Reader(LOCAL_RESOURCES_DIR / MIXED_T)
+    images = dict(zip(rdr.scenes, rdr.ome_metadata.images))
+    assert images["3D"].pixels.size_t == 4
+    assert images["3DFL/CH0"].pixels.size_t == 2
 
 
 @pytest.mark.parametrize(
     "filename, scene, expected",
     [
         (
-            "sample.TCF",
+            TIMELAPSE,
             "3D",
             {
                 "Dimensions Present": "TZYX",
-                "Image Size T": 10,
-                "Image Size X": 296,
-                "Image Size Y": 296,
-                "Image Size Z": 208,
-                "Imaging Datetime": datetime(2021, 7, 23, 17, 51, 55),
-                "Objective": "58x/1.2Water",
-                "Pixel Size X": 0.09551566211946805,
-                "Pixel Size Y": 0.09551566211946805,
-                "Pixel Size Z": 0.190974358974359,
-                "Stage Position X": 0.706384,
-                "Stage Position Y": 1.53143,
+                "Image Size T": 3,
+                "Image Size Z": 70,
+                "Image Size Y": 64,
+                "Image Size X": 64,
+                "Imaged By": "Default",
+                "Imaging Datetime": datetime(2025, 10, 3, 10, 45, 6, 802000),
+                "Objective": "40x/0.68",
+                "Pixel Size Z": HT_PX[0],
+                "Pixel Size Y": HT_PX[1],
+                "Pixel Size X": HT_PX[2],
+                "Stage Position X": 0.948,
+                "Stage Position Y": -0.834,
                 "Timelapse": True,
-                "Timelapse Interval": timedelta(microseconds=992556),
+                "Timelapse Interval": timedelta(seconds=82, microseconds=816000),
+                "Total Time Duration": timedelta(seconds=165, microseconds=632000),
             },
         ),
         (
-            "sample.TCF",
-            "2DMIP",
-            {
-                "Dimensions Present": "TYX",
-                "Image Size T": 10,
-                "Image Size X": 296,
-                "Image Size Y": 296,
-                "Image Size Z": None,
-                "Imaging Datetime": datetime(2021, 7, 23, 17, 51, 55),
-                "Objective": "58x/1.2Water",
-                "Pixel Size X": 0.09551566211946805,
-                "Pixel Size Y": 0.09551566211946805,
-                "Pixel Size Z": None,
-                "Stage Position X": 0.706384,
-                "Stage Position Y": 1.53143,
-                "Timelapse": True,
-                "Timelapse Interval": timedelta(microseconds=992556),
-            },
-        ),
-        (
-            "mito_T008P01.TCF",
-            "3D",
-            {
-                "Dimensions Present": "TZYX",
-                "Image Size T": 1,
-                "Image Size X": 692,
-                "Image Size Y": 692,
-                "Image Size Z": 132,
-                "Imaging Datetime": datetime(2026, 6, 25, 12, 9, 53),
-                "Objective": "40x/0.38Water",
-                "Pixel Size X": 0.33200404047966003,
-                "Pixel Size Y": 0.33200404047966003,
-                "Pixel Size Z": 1.1029136180877686,
-                "Stage Position X": 0.531,
-                "Stage Position Y": 0.657,
-                "Timelapse": False,
-                "Timelapse Interval": None,
-            },
-        ),
-        (
-            "mito_T008P01.TCF",
+            MIXED_T,
             "3DFL/CH0",
             {
                 "Dimensions Present": "TZYX",
-                "Image Size T": 1,
-                "Image Size X": 1890,
-                "Image Size Y": 1890,
-                "Image Size Z": 65,
-                "Imaging Datetime": datetime(2026, 6, 25, 12, 9, 53),
-                "Objective": "40x/0.38Water",
-                "Pixel Size X": 0.1217217817902565,
-                "Pixel Size Y": 0.1217217817902565,
-                "Pixel Size Z": 1.0416406393051147,
-                "Stage Position X": 0.531,
-                "Stage Position Y": 0.657,
-                "Timelapse": False,
-                "Timelapse Interval": None,
+                "Image Size T": 2,
+                "Image Size Z": 27,
+                "Objective": "40x/0.38",
+                "Pixel Size Z": LOW_NA_FL_PX[0],
+                "Pixel Size X": LOW_NA_FL_PX[2],
+                "Stage Position X": 0.067,
+                "Stage Position Y": -1.343,
+                "Timelapse": True,
+                "Timelapse Interval": timedelta(seconds=901, microseconds=519000),
             },
         ),
     ],
 )
 def test_standard_metadata(filename, scene, expected):
-    """standard_metadata.to_dict() must match expected values."""
     rdr = Reader(LOCAL_RESOURCES_DIR / filename)
     rdr.set_scene(scene)
     metadata = rdr.standard_metadata.to_dict()
-
-    for key, expected_value in expected.items():
-        error_message = f"{key}: Expected {expected_value!r}, got {metadata[key]!r}"
-        if isinstance(expected_value, float):
-            assert metadata[key] == pytest.approx(expected_value), error_message
+    for key, value in expected.items():
+        if isinstance(value, float):
+            assert metadata[key] == pytest.approx(value), key
         else:
-            assert metadata[key] == expected_value, error_message
-
-
-@pytest.mark.parametrize("scene", ["3D", "2DMIP"])
-def test_time_interval(scene):
-    """time_interval must be a timedelta of ~1 second for sample.TCF."""
-    rdr = Reader(LOCAL_RESOURCES_DIR / "sample.TCF")
-    rdr.set_scene(scene)
-    assert rdr.time_interval == timedelta(seconds=1.0)
+            assert metadata[key] == value, key

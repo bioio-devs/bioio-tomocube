@@ -1,104 +1,204 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
+"""Reader for Tomocube TCF (HDF5) holotomography files."""
 
-"""Format-dispatching entry point for the bioio-tomocube plugin.
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
-Tomocube data arrives in two shapes:
-
-* ``.TCF`` — the native HDF5 container written by TomoStudio, read by
-  :class:`bioio_tomocube.tcf_reader.TCFReader`.
-* ``.TIFF`` — per-modality ImageJ-style TIFF exports written by the HTX
-  ``ProcessingServer``, read by :class:`bioio_tomocube.tiff_reader.TiffReader`.
-
-:class:`Reader` is the class registered with bioio.  Instantiating it returns
-the concrete backend for the given path, so ``Reader(path)`` always yields an
-object with the same scene naming and API regardless of the on-disk format.
-"""
-
-import logging
-from typing import Any, Optional, Type
-
-from bioio_base import exceptions, io, reader, types
+import dask
+import dask.array as da
+import h5py
+import numpy as np
+import xarray as xr
+from bioio_base import constants, exceptions, io, types
+from bioio_base.dimensions import DimensionNames
+from bioio_base.reader import Reader as BaseReader
+from bioio_base.standard_metadata import StandardMetadata
 from fsspec.spec import AbstractFileSystem
+from ome_types.model import OME
+
+from bioio_tomocube.ome_utils import attr, build_ome, group_attrs
 
 ###############################################################################
 
-log = logging.getLogger(__name__)
-
-###############################################################################
-
-_TCF_EXTENSIONS = (".tcf",)
-_TIFF_EXTENSIONS = (".tiff", ".tif")
+# Brightfield groups hold encoded images rather than arrays; not supported.
+_SKIPPED_GROUPS = frozenset({"BF"})
 
 
-def _select_backend(path: str) -> Type["Reader"]:
-    """Pick the concrete reader class for *path* based on its extension."""
-    lowered = path.lower()
-    if lowered.endswith(_TCF_EXTENSIONS):
-        from bioio_tomocube.tcf_reader import TCFReader
-
-        return TCFReader
-    if lowered.endswith(_TIFF_EXTENSIONS):
-        from bioio_tomocube.tiff_reader import TiffReader
-
-        return TiffReader
-    raise exceptions.UnsupportedFileFormatError(
-        "bioio-tomocube",
-        path,
-        "File does not have a .TCF or .TIFF/.TIF extension.",
-    )
+class _SceneInfo(NamedTuple):
+    n_frames: int
+    spatial_shape: Tuple[int, ...]  # ZYX or YX
+    pixel_sizes: types.PhysicalPixelSizes
+    stage_x: Optional[float]
+    stage_y: Optional[float]
+    tcf_metadata: Dict[str, Any]
+    ome: OME
 
 
-class Reader(reader.Reader):
-    """Read Tomocube holotomography data (``.TCF`` or HTX ``.TIFF`` exports).
+def _read_frame(
+    fs: AbstractFileSystem, path: str, scene: str, index: int
+) -> np.ndarray:
+    """Open the file, read one frame as float32, close. Safe on dask workers."""
+    with fs.open(path, "rb") as fobj, h5py.File(fobj, "r") as f:
+        return np.asarray(f[f"Data/{scene}/{index:06d}"][()], dtype=np.float32)
+
+
+class Reader(BaseReader):
+    """Read Tomocube ``.TCF`` files.
+
+    Each ``Data/`` group is a scene: ``3D`` and ``2DMIP`` for refractive index,
+    ``3DFL/CHn`` and ``2DFLMIP/CHn`` per fluorescence channel. Scene names are the
+    HDF5 paths under ``Data/``. Pixel values are the stored integers as
+    ``float32``; refractive-index scenes hold RI x 10 000.
 
     Parameters
     ----------
     image : Path or str
-        Path to a ``.TCF`` file or to any TIFF of an HTX export.  Any
-        fsspec-compatible URI is accepted.
+        Path to a ``.TCF`` file. Any fsspec-compatible URI is accepted.
     fs_kwargs : Dict[str, Any]
-        Keyword arguments forwarded to the fsspec filesystem.  Default: ``{}``.
-    **kwargs
-        Backend-specific options, e.g. ``timelapse=True`` or
-        ``refractive_index=True`` for TIFF exports (see
-        :class:`~bioio_tomocube.tiff_reader.TiffReader`).
-
-    Raises
-    ------
-    exceptions.UnsupportedFileFormatError
-        If the file is neither a ``.TCF`` file nor a Tomocube TIFF export.
-
-    Notes
-    -----
-    ``Reader(path)`` returns an instance of the matching backend
-    (:class:`~bioio_tomocube.tcf_reader.TCFReader` or
-    :class:`~bioio_tomocube.tiff_reader.TiffReader`); both are subclasses of
-    this class, so ``isinstance(rdr, Reader)`` holds.
-
-    Both backends expose imaging modalities as **scenes** with shared names:
-
-    * ``"3D"`` — 3-D refractive-index volume (``TZYX``)
-    * ``"2DMIP"`` — 2-D refractive-index max projection (``TYX``)
-    * ``"3DFL/CH0"``, ``"3DFL/CH1"``, … — 3-D fluorescence channels (``TZYX``)
-    * ``"2DFLMIP"`` / ``"2DFLMIP/CHn"`` — 2-D fluorescence max projections
+        Keyword arguments forwarded to the fsspec filesystem.
     """
 
-    def __new__(
-        cls, image: Optional[types.PathLike] = None, *args: Any, **kwargs: Any
-    ) -> "Reader":
-        # ``image`` is optional only so that unpickling (which calls
-        # ``cls.__new__(cls)`` with no arguments) works for the backends.
-        if cls is Reader:
-            if image is None:
-                raise TypeError("Reader() missing required argument: 'image'")
-            fs_kwargs = kwargs.get("fs_kwargs") or {}
-            _, path = io.pathlike_to_fs(image, enforce_exists=True, fs_kwargs=fs_kwargs)
-            backend = _select_backend(path)
-            return super().__new__(backend)
-        return super().__new__(cls)
+    _physical_pixel_sizes: Optional[types.PhysicalPixelSizes]
 
     @staticmethod
     def _is_supported_image(fs: AbstractFileSystem, path: str, **kwargs: Any) -> bool:
-        backend = _select_backend(path)
-        return backend._is_supported_image(fs, path, **kwargs)
+        if path.upper().endswith(".TCF"):
+            return True
+        raise exceptions.UnsupportedFileFormatError(
+            "bioio-tomocube", path, "File does not have a .TCF extension."
+        )
+
+    def __init__(
+        self, image: types.PathLike, fs_kwargs: Optional[Dict[str, Any]] = None
+    ) -> None:
+        self._fs, self._path = io.pathlike_to_fs(
+            image, enforce_exists=True, fs_kwargs=fs_kwargs or {}
+        )
+        self._is_supported_image(self._fs, self._path)
+        self._scenes: Optional[Tuple[str, ...]] = None
+        self._scene_info: Optional[_SceneInfo] = None
+
+    def _reset_self(self) -> None:
+        super()._reset_self()
+        self._scene_info = None
+
+    @property
+    def scenes(self) -> Tuple[str, ...]:
+        if self._scenes is None:
+            found: List[str] = []
+            with self._fs.open(self._path, "rb") as fobj, h5py.File(fobj, "r") as f:
+                for name, group in f["Data"].items():
+                    if name in _SKIPPED_GROUPS:
+                        continue
+                    children = list(group.values())
+                    if children and isinstance(children[0], h5py.Group):
+                        found.extend(f"{name}/{ch}" for ch in group)  # per channel
+                    else:
+                        found.append(name)
+            self._scenes = tuple(found)
+        return self._scenes
+
+    def _load_scene_info(self) -> _SceneInfo:
+        """Open the file once per scene and cache everything but pixels."""
+        if self._scene_info is None:
+            scene = self.current_scene
+            modality = scene.split("/")[0]
+            with self._fs.open(self._path, "rb") as fobj, h5py.File(fobj, "r") as f:
+                mod = group_attrs(f[f"Data/{modality}"])
+                first = f[f"Data/{scene}/000000"]
+                shape = (
+                    (int(mod["SizeZ"]), int(mod["SizeY"]), int(mod["SizeX"]))
+                    if "SizeZ" in mod
+                    else (int(mod["SizeY"]), int(mod["SizeX"]))
+                )
+                res = [mod.get(f"Resolution{axis}") for axis in "ZYX"]
+                meta: Dict[str, Any] = {
+                    "root": group_attrs(f),
+                    "scene": mod,
+                    "info": {k: group_attrs(v) for k, v in f["Info"].items()},
+                }
+                if "/" in scene:
+                    meta["channel"] = group_attrs(f[f"Data/{scene}"])
+                self._scene_info = _SceneInfo(
+                    n_frames=int(mod["DataCount"]),
+                    spatial_shape=shape,
+                    pixel_sizes=types.PhysicalPixelSizes(
+                        *(float(r) if r is not None else None for r in res)
+                    ),
+                    stage_x=attr(first, "PositionX"),
+                    stage_y=attr(first, "PositionY"),
+                    tcf_metadata=meta,
+                    ome=build_ome(f, self.scenes),
+                )
+        return self._scene_info
+
+    def _build_xarray(self, delayed: bool) -> xr.DataArray:
+        info = self._load_scene_info()
+        scene = self.current_scene
+        spatial_dims = [
+            DimensionNames.SpatialZ,
+            DimensionNames.SpatialY,
+            DimensionNames.SpatialX,
+        ][-len(info.spatial_shape) :]
+
+        if delayed:
+            data: Any = da.stack(
+                [
+                    da.from_delayed(
+                        dask.delayed(_read_frame)(self._fs, self._path, scene, i),
+                        shape=info.spatial_shape,
+                        dtype=np.float32,
+                    )
+                    for i in range(info.n_frames)
+                ]
+            )
+        else:
+            with self._fs.open(self._path, "rb") as fobj, h5py.File(fobj, "r") as f:
+                data = np.stack(
+                    [
+                        np.asarray(f[f"Data/{scene}/{i:06d}"][()], dtype=np.float32)
+                        for i in range(info.n_frames)
+                    ]
+                )
+
+        return xr.DataArray(
+            data,
+            dims=[DimensionNames.Time, *spatial_dims],
+            attrs={
+                constants.METADATA_UNPROCESSED: info.tcf_metadata,
+                constants.METADATA_PROCESSED: info.ome,
+            },
+        )
+
+    def _read_delayed(self) -> xr.DataArray:
+        return self._build_xarray(delayed=True)
+
+    def _read_immediate(self) -> xr.DataArray:
+        return self._build_xarray(delayed=False)
+
+    @property
+    def dtype(self) -> np.dtype:
+        return np.dtype(np.float32)
+
+    @property
+    def ome_metadata(self) -> OME:
+        return self._load_scene_info().ome
+
+    @property
+    def tcf_metadata(self) -> Dict[str, Any]:
+        """HDF5 attributes: ``root``, ``scene`` (modality group), ``channel``
+        (fluorescence channel group, when present) and ``info`` (``Info/*``)."""
+        return self._load_scene_info().tcf_metadata
+
+    @property
+    def physical_pixel_sizes(self) -> types.PhysicalPixelSizes:
+        return self._load_scene_info().pixel_sizes
+
+    @property
+    def standard_metadata(self) -> StandardMetadata:
+        metadata = super().standard_metadata
+        info = self._load_scene_info()
+        metadata.stage_position_x = info.stage_x
+        metadata.stage_position_y = info.stage_y
+        # Acquisition start is the earliest frame of any scene, not scene 0's.
+        starts = [i.acquisition_date for i in info.ome.images if i.acquisition_date]
+        metadata.imaging_datetime = min(starts) if starts else None
+        return metadata

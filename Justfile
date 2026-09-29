@@ -53,8 +53,3 @@ tag-for-release version:
 # release a new version
 release:
 	git push --follow-tags
-
-# update this repo using latest cookiecutter-bioio-reader
-update-from-cookiecutter:
-	pip install cookiecutter
-	cookiecutter gh:bioio-devs/cookiecutter-bioio-reader --config-file .cookiecutter.yaml --no-input --overwrite-if-exists --output-dir ..

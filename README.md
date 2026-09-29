@@ -5,7 +5,11 @@
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.10–3.13](https://img.shields.io/badge/python-3.10--3.13-blue.svg)](https://www.python.org/downloads/)
 
-A BioIO reader plugin for Tomocube holotomography data: `.TCF` files and HTX `.TIFF` exports.
+A BioIO reader plugin for Tomocube `.TCF` holotomography files, the HDF5 container
+written by TomoStudio on HT-series instruments. No proprietary library is needed.
+
+For the TIFF export produced by the HTX ProcessingServer use
+[bioio-tomocube-tiff](https://github.com/bioio-devs/bioio-tomocube-tiff).
 
 ---
 
@@ -21,117 +25,53 @@ For full documentation of the `BioImage` API, see
 
 **Development Head:** `pip install git+https://github.com/bioio-devs/bioio-tomocube.git`
 
-## Overview
+## What you get
 
-This plugin reads data produced by [Tomocube](https://www.tomocube.com) HT-series
-holotomography instruments in either of the two forms it leaves the instrument in:
+One `.TCF` file is one acquisition: every modality and every timepoint of one
+position. Each modality is a BioIO **scene**, because the refractive-index and
+fluorescence volumes are stored on different pixel grids.
 
-| Format | Extension | Written by | Backend |
-|---|---|---|---|
-| TCF (HDF5 container) | `.TCF` | TomoStudio | `bioio_tomocube.TCFReader` (via `h5py`) |
-| TIFF export (one ImageJ-style multi-page TIFF per modality and channel) | `.TIFF` / `.TIF` | HTX ProcessingServer | `bioio_tomocube.TiffReader` (via `tifffile`) |
+| Scene | Content | Dims |
+|---|---|---|
+| `3D` | refractive-index volume | `TZYX` |
+| `2DMIP` | its max projection, as stored by the instrument | `TYX` |
+| `3DFL/CH0`, `3DFL/CH1`, … | fluorescence volumes, one scene per channel | `TZYX` |
+| `2DFLMIP/CH0`, `2DFLMIP/CH1`, … | fluorescence max projections | `TYX` |
 
-`bioio_tomocube.Reader` picks the backend from the file extension, so the same code
-works for both. No proprietary library is required.
-
-The two formats differ in how modalities are organised:
-
-* **TCF**: each modality is a separate BioIO **scene**, because the HDF5 file stores
-  the refractive-index and fluorescence volumes on different pixel grids.
-* **TIFF export**: the processing server has already resampled every modality onto
-  one pixel grid, so the modalities become the **channels** of a single scene, giving
-  you the usual `TCZYX` image straight away.
-
-| Format | Scene | Content | Dimensions / channels |
-|---|---|---|---|
-| TCF | `3D` | 3-D refractive index volume | `TZYX` |
-| TCF | `2DMIP` | 2-D refractive index max projection | `TYX` |
-| TCF | `3DFL/CH0`, `3DFL/CH1`, … | 3-D fluorescence channels | `TZYX` |
-| TCF | `2DFLMIP` | 2-D fluorescence max projection | `TYX` |
-| TIFF | `3D` | volumes | `TCZYX`, channels `HT`, `FL_CH0`, `FL_CH1`, … |
-| TIFF | `2DMIP` | max projections (when exported) | `TCYX`, same channel names |
-
-Physical pixel sizes (µm) are exposed via `physical_pixel_sizes` for both formats.
-
-### TCF files
-
-Pixel data is read directly from the HDF5 structure and returned as `float32`.
-
-### TIFF exports
-
-An HTX export of one acquisition (one timepoint) looks like this on disk:
-
-```
-<base>.TP01_HT3D_0.00.TIFF              # refractive-index volume  -> channel HT
-<base>.TP01/
-    <base>.TP01_FL3D_CH0_0.00.TIFF      # fluorescence volume      -> channel FL_CH0
-    <base>.TP01_FL3D_CH1_0.00.TIFF      #                          -> channel FL_CH1
-    <base>.TP01_FL2D_CH0_0.00.TIFF      # fluorescence MIP (optional) -> scene 2DMIP
-```
-
-Pass **any** of those files to the reader; the sibling files of the same acquisition
-are discovered automatically and combined along `C`. The default scene is the one
-containing the file you passed. Pixel data is returned as stored (`uint16`); the `HT`
-channel holds refractive index × 10 000.
-
-Two options are specific to this backend:
-
-* `timelapse=True` stacks every `<base>.TPnn` timepoint found next to the file along
-  `T`, ordered by timepoint. `time_interval` and the OME planes are derived from the
-  TIFF `DateTime` tags. Only timepoints at which **every** channel of a scene was
-  exported are kept; incomplete timepoints are dropped with a warning rather than
-  zero-filled.
-* `refractive_index=True` converts the `HT` channel to refractive index. Because all
-  channels share one array, the whole scene is then returned as `float32` and the
-  fluorescence channels are cast.
-
-Quirks of the export that the reader handles for you:
-
-* The `FL3D` volumes are resampled onto the HT Z grid, but their ImageJ header still
-  reports the original fluorescence slice count and spacing. `tifffile` alone
-  therefore reports the wrong shape. This reader always enumerates the TIFF pages
-  directly and takes the Z spacing from the `HT` channel; the per-channel header
-  values are kept in `reader.tiff_metadata["imagej"]`.
-* Fluorescence data occupies only a sub-range of the Z planes; the remaining planes
-  are zero.
-* Should an export ever place modalities on different pixel grids, the reader falls
-  back to one scene per channel (`3D/HT`, `3D/FL_CH0`, …) and logs a warning instead
-  of resampling.
+Pixel values are the stored integers cast to `float32`. The refractive-index scenes
+hold RI × 10 000 (a value of 13 370 is RI 1.3370). Fluorescence channels may be stored
+as `uint8` or `uint16` in the same file. Physical pixel sizes are in micrometres. `standard_metadata` carries the objective,
+stage position and per-frame timing; fluorescence channels carry excitation and
+emission wavelengths in the OME metadata.
 
 ## Example Usage
 
 ```python
 from bioio import BioImage
-import bioio_tomocube
 
-# TCF
-img = BioImage("my_file.TCF", reader=bioio_tomocube.Reader)
-print(img.scenes)          # ('2DMIP', '3D', '3DFL/CH0', ...)
+img = BioImage("251003.104445.6 Well Mito.003.Group1.A1.T001P01.TCF")
+img.scenes                      # ('2DFLMIP/CH0', '2DFLMIP/CH1', '2DMIP', '3D', '3DFL/CH0', '3DFL/CH1')
 img.set_scene("3D")
-data = img.get_image_dask_data("TZYX")
-print(img.physical_pixel_sizes)  # PhysicalPixelSizes(Z=0.22, Y=0.11, X=0.11)
+img.shape                       # (16, 70, 1414, 1414)
+img.physical_pixel_sizes        # PhysicalPixelSizes(Z=0.874, Y=0.163, X=0.163)
+ri = img.get_image_dask_data("ZYX", T=0) * 1e-4
 
-# TIFF export: one timepoint, all modalities as channels, raw uint16
-img = BioImage("exp.TP01_HT3D_0.00.TIFF")   # auto-selected, no reader= needed
-print(img.scenes)          # ('3D',)  or ('3D', '2DMIP') when MIPs were exported
-print(img.channel_names)   # ['HT', 'FL_CH0', 'FL_CH1']
-fl0 = img.get_image_dask_data("ZYX", C=1)
-
-# TIFF export: all timepoints stacked along T, HT channel as refractive index
-img = BioImage("exp.TP01_HT3D_0.00.TIFF", timelapse=True, refractive_index=True)
-data = img.get_image_dask_data("TCZYX")     # float32
-print(img.time_interval)                    # mean interval between timepoints
+img.set_scene("3DFL/CH1")
+img.shape                       # (16, 12, 1894, 1894)
 ```
+
+Frame counts can differ between scenes of one file: an acquisition may record
+fluorescence on every third refractive-index frame.
 
 ## Remote Filesystem Support
 
-The reader accepts any [fsspec](https://filesystem-spec.readthedocs.io)-compatible URI,
-including S3, GCS, and plain HTTPS. The filesystem is serialised into the dask graph so
-that delayed pixel reads also work remotely without downloading the file first:
+Any [fsspec](https://filesystem-spec.readthedocs.io)-compatible URI works, and the
+filesystem is carried into the dask graph so delayed reads also work remotely:
 
 ```python
-# Read directly from an HTTPS endpoint
-rdr = bioio_tomocube.Reader("https://example.org/path/to/file.TCF")
+import bioio_tomocube
+
+rdr = bioio_tomocube.Reader("s3://bucket/path/to/file.TCF")
 rdr.set_scene("3D")
 first_frame = rdr.xarray_dask_data[0].compute()
 ```
@@ -142,4 +82,6 @@ first_frame = rdr.xarray_dask_data[0].compute()
 
 ## Development
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for information related to developing the code.
+See [CONTRIBUTING.md](CONTRIBUTING.md). Test fixtures are real instrument files cropped
+to 64 × 64 pixels (`scripts/make_fixtures.py`) and tracked with Git LFS: run
+`git lfs pull` before `just test`.

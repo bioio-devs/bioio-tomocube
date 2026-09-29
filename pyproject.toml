@@ -10,8 +10,7 @@ build-backend = "setuptools.build_meta"
 # https://peps.python.org/pep-0621/
 [project]
 name = "bioio-tomocube"
-description = "A BioIO reader plugin for Tomocube holotomography data (TCF files and HTX TIFF exports)."
-keywords = []
+description = "A BioIO reader plugin for Tomocube TCF holotomography files."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT License" }
@@ -34,14 +33,12 @@ dependencies = [
   "h5py>=3.0",
   "numpy>=1.16",
   "ome-types>=0.4.0",
-  "tifffile>=2022.8.12",
   "xarray>=0.16.1",
 ]
 
 [project.urls]
 Homepage = "https://github.com/bioio-devs/bioio-tomocube"
 "Bug Tracker" = "https://github.com/bioio-devs/bioio-tomocube/issues"
-Documentation = "https://bioio-devs.github.io/bioio-tomocube"
 "User Support" = "https://github.com/bioio-devs/bioio-tomocube/issues"
 
 # extra dependencies
@@ -51,10 +48,8 @@ lint = [
   "pre-commit>=2.20.0",
 ]
 test = [
-  "coverage>=5.1",
   "pytest>=5.4.3",
   "pytest-cov>=2.9.0",
-  "pytest-raises>=0.11",
 ]
 
 # entry points
@@ -72,7 +67,7 @@ include-package-data = true
 exclude = ["*docs/*", "*tests/*"]
 
 [tool.setuptools.package-data]
-"*" = ["*.yaml", "py.typed"]
+"*" = ["py.typed"]
 
 # tools
 [tool.black]
@@ -90,13 +85,12 @@ use_parentheses = true
 # https://github.com/mgedmin/check-manifest#configuration
 [tool.check-manifest]
 ignore = [
-  ".editorconfig",
   ".pre-commit-config.yaml",
-  "CODE_OF_CONDUCT.md",
   "CONTRIBUTING.md",
+  "HANDOFF.md",
   "Justfile",
-  ".cookiecutter.yaml",
-  "scripts/benchmark.py",
+  "docs/**",
+  "scripts/**",
 ]
 
 [tool.mypy]

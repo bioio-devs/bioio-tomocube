@@ -30,6 +30,3 @@ repos:
     hooks:
       - id: mypy
         exclude: "^bioio_tomocube/tests/"
-        additional_dependencies:
-          - types-PyYAML>=6.0.12.9
-          - types-python-dateutil
