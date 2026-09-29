@@ -4,6 +4,7 @@
 from datetime import datetime
 from typing import List, Optional, Tuple
 
+import h5py
 import numpy as np
 import pytest
 from bioio_base import exceptions, test_utilities
@@ -144,6 +145,37 @@ def test_tomocube_reader(
         expected_physical_pixel_sizes=expected_physical_pixel_sizes,
         expected_metadata_type=expected_metadata_type,
     )
+
+
+def test_multi_scene() -> None:
+    uri = LOCAL_RESOURCES_DIR / "251003.112316.6 Well Mito.018.Group1.A1.TP01.TCF"
+    test_utilities.run_multi_scene_image_read_checks(
+        ImageContainer=Reader,
+        image=uri,
+        first_scene_id="3D",
+        first_scene_shape=(1, 70, 64, 64),
+        first_scene_dtype=np.dtype(np.float32),
+        second_scene_id="3DFL/CH0",
+        second_scene_shape=(1, 12, 64, 64),
+        second_scene_dtype=np.dtype(np.float32),
+        allow_same_scene_data=False,
+        reader_kwargs={},
+    )
+
+
+@pytest.mark.parametrize("set_scene", ["3D", "3DFL/CH1", "2DFLMIP/CH0"])
+def test_pixel_values_match_hdf5(set_scene: str) -> None:
+    """Values are the stored integers cast to float32: HT is RI x 10 000."""
+    uri = LOCAL_RESOURCES_DIR / "251003.112316.6 Well Mito.018.Group1.A1.TP01.TCF"
+    rdr = Reader(uri)
+    rdr.set_scene(set_scene)
+
+    with h5py.File(uri, "r") as f:
+        expected = f[f"Data/{set_scene}/000000"][()]
+    np.testing.assert_array_equal(rdr.data[0], expected)
+
+    if set_scene == "3D":
+        assert 13_000 < rdr.data.min() < rdr.data.max() < 14_300
 
 
 def test_ome_metadata() -> None:
