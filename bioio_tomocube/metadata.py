@@ -3,7 +3,6 @@ from typing import Any, Dict
 import numpy as np
 
 
-
 def _plain(value: Any) -> Any:
     """h5py attribute value to a plain Python scalar, string or list."""
     if isinstance(value, bytes):
