@@ -14,7 +14,7 @@ from bioio_base.standard_metadata import StandardMetadata
 from fsspec.spec import AbstractFileSystem
 from ome_types.model import OME
 
-from bioio_tomocube.ome_utils import attr, build_ome, group_attrs
+from bioio_tomocube.metadata import attr, build_ome, group_attrs
 
 ###############################################################################
 
@@ -29,7 +29,6 @@ class _SceneInfo(NamedTuple):
     stage_x: Optional[float]
     stage_y: Optional[float]
     tcf_metadata: Dict[str, Any]
-    ome: OME
 
 
 def _read_frame(
@@ -75,6 +74,7 @@ class Reader(BaseReader):
         self._is_supported_image(self._fs, self._path)
         self._scenes: Optional[Tuple[str, ...]] = None
         self._scene_info: Optional[_SceneInfo] = None
+        self._ome: Optional[OME] = None  # scene-independent, built once
 
     def _reset_self(self) -> None:
         super()._reset_self()
@@ -126,8 +126,9 @@ class Reader(BaseReader):
                     stage_x=attr(first, "PositionX"),
                     stage_y=attr(first, "PositionY"),
                     tcf_metadata=meta,
-                    ome=build_ome(f, self.scenes),
                 )
+                if self._ome is None:
+                    self._ome = build_ome(f, self.scenes)
         return self._scene_info
 
     def _build_xarray(self, delayed: bool) -> xr.DataArray:
@@ -164,7 +165,7 @@ class Reader(BaseReader):
             dims=[DimensionNames.Time, *spatial_dims],
             attrs={
                 constants.METADATA_UNPROCESSED: info.tcf_metadata,
-                constants.METADATA_PROCESSED: info.ome,
+                constants.METADATA_PROCESSED: self.ome_metadata,
             },
         )
 
@@ -180,7 +181,9 @@ class Reader(BaseReader):
 
     @property
     def ome_metadata(self) -> OME:
-        return self._load_scene_info().ome
+        self._load_scene_info()
+        assert self._ome is not None
+        return self._ome
 
     @property
     def tcf_metadata(self) -> Dict[str, Any]:
@@ -199,6 +202,10 @@ class Reader(BaseReader):
         metadata.stage_position_x = info.stage_x
         metadata.stage_position_y = info.stage_y
         # Acquisition start is the earliest frame of any scene, not scene 0's.
-        starts = [i.acquisition_date for i in info.ome.images if i.acquisition_date]
+        images = self.ome_metadata.images
+        starts = [i.acquisition_date for i in images if i.acquisition_date]
         metadata.imaging_datetime = min(starts) if starts else None
+        # bioio-base renders "<mag>x/<NA>", and the file has no objective NA.
+        magnification = info.tcf_metadata["info"].get("Device", {}).get("Magnification")
+        metadata.objective = f"{round(magnification)}x" if magnification else None
         return metadata

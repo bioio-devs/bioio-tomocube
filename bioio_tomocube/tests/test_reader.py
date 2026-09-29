@@ -126,7 +126,8 @@ def test_ome_metadata():
     ome = rdr.ome_metadata
     assert len(ome.images) == len(rdr.scenes) == 6
     objective = ome.instruments[0].objectives[0]
-    assert (objective.nominal_magnification, objective.lens_na) == (40.0, 0.68)
+    assert objective.nominal_magnification == 40.0
+    assert objective.lens_na is None  # Info/Device NA is the condenser's
     assert ome.experimenters[0].user_name == "Default"
 
     images = dict(zip(rdr.scenes, ome.images))
@@ -162,7 +163,7 @@ def test_ome_planes_carry_frame_times():
                 "Image Size X": 64,
                 "Imaged By": "Default",
                 "Imaging Datetime": datetime(2025, 10, 3, 10, 45, 6, 802000),
-                "Objective": "40x/0.68",
+                "Objective": "40x",
                 "Pixel Size Z": HT_PX[0],
                 "Pixel Size Y": HT_PX[1],
                 "Pixel Size X": HT_PX[2],
@@ -180,7 +181,7 @@ def test_ome_planes_carry_frame_times():
                 "Dimensions Present": "TZYX",
                 "Image Size T": 2,
                 "Image Size Z": 27,
-                "Objective": "40x/0.38",
+                "Objective": "40x",
                 "Pixel Size Z": LOW_NA_FL_PX[0],
                 "Pixel Size X": LOW_NA_FL_PX[2],
                 "Stage Position X": 0.067,

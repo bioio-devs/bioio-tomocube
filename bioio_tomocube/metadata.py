@@ -1,4 +1,4 @@
-"""OME metadata from an open TCF file."""
+"""HDF5 attribute helpers and OME metadata for TCF files."""
 
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
@@ -117,15 +117,16 @@ def build_ome(f: h5py.File, scenes: Tuple[str, ...]) -> OME:
     refs: Dict[str, Any] = {}
     ome_kwargs: Dict[str, Any] = {}
 
-    device = group_attrs(f["Info/Device"]) if "Info/Device" in f else {}
-    objective_kwargs: Dict[str, Any] = {"id": "Objective:0"}
-    if device.get("Magnification") is not None:
-        objective_kwargs["nominal_magnification"] = float(device["Magnification"])
-    if device.get("NA") is not None:
-        objective_kwargs["lens_na"] = float(device["NA"])
-    if len(objective_kwargs) > 1:
+    # Info/Device "NA" is the condenser, not the objective, so only magnification.
+    magnification = (
+        attr(f["Info/Device"], "Magnification") if "Info/Device" in f else None
+    )
+    if magnification is not None:
+        objective = Objective(
+            id="Objective:0", nominal_magnification=float(magnification)
+        )
         ome_kwargs["instruments"] = [
-            Instrument(id="Instrument:0", objectives=[Objective(**objective_kwargs)])
+            Instrument(id="Instrument:0", objectives=[objective])
         ]
         refs["instrument_ref"] = InstrumentRef(id="Instrument:0")
 
