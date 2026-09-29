@@ -9,8 +9,9 @@ from bioio_base import constants, exceptions, io, types
 from bioio_base.dimensions import DimensionNames
 from bioio_base.reader import Reader as BaseReader
 from fsspec.spec import AbstractFileSystem
+from ome_types.model import OME
 
-from bioio_tomocube.metadata import attr, group_attrs
+from bioio_tomocube.metadata import attr, build_ome, group_attrs
 
 ###############################################################################
 
@@ -65,6 +66,7 @@ class Reader(BaseReader):
         self._is_supported_image(self._fs, self._path)
         self._scenes: Optional[Tuple[str, ...]] = None
         self._scene_info: Optional[_SceneInfo] = None
+        self._ome: Optional[OME] = None
 
     def _reset_self(self) -> None:
         super()._reset_self()
@@ -117,6 +119,8 @@ class Reader(BaseReader):
                     stage_y=attr(first, "PositionY"),
                     tcf_metadata=meta,
                 )
+                if self._ome is None:
+                    self._ome = build_ome(f, self.scenes)
         return self._scene_info
 
     def _build_xarray(self, delayed: bool) -> xr.DataArray:
@@ -153,6 +157,7 @@ class Reader(BaseReader):
             dims=[DimensionNames.Time, *spatial_dims],
             attrs={
                 constants.METADATA_UNPROCESSED: info.tcf_metadata,
+                constants.METADATA_PROCESSED: self.ome_metadata,
             },
         )
 
@@ -165,6 +170,12 @@ class Reader(BaseReader):
     @property
     def dtype(self) -> np.dtype:
         return np.dtype(np.float32)
+
+    @property
+    def ome_metadata(self) -> OME:
+        self._load_scene_info()
+        assert self._ome is not None
+        return self._ome
 
     @property
     def physical_pixel_sizes(self) -> types.PhysicalPixelSizes:
