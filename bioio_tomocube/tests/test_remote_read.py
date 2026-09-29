@@ -41,6 +41,7 @@ def test_remote_scenes_and_metadata(mem_fs: MemoryFileSystem) -> None:
     rdr.set_scene("3D")
     assert rdr.shape == (1, 70, 64, 64)
     assert rdr.physical_pixel_sizes.Z == pytest.approx(0.874491274356842)
+    assert len(rdr.ome_metadata.images) == 6
 
 
 def test_remote_read_is_lazy_and_matches_local(mem_fs: MemoryFileSystem) -> None:
