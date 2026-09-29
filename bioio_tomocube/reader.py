@@ -8,6 +8,7 @@ import xarray as xr
 from bioio_base import constants, exceptions, io, types
 from bioio_base.dimensions import DimensionNames
 from bioio_base.reader import Reader as BaseReader
+from bioio_base.standard_metadata import StandardMetadata
 from fsspec.spec import AbstractFileSystem
 from ome_types.model import OME
 
@@ -180,3 +181,16 @@ class Reader(BaseReader):
     @property
     def physical_pixel_sizes(self) -> types.PhysicalPixelSizes:
         return self._load_scene_info().pixel_sizes
+
+    @property
+    def standard_metadata(self) -> StandardMetadata:
+        metadata = super().standard_metadata
+        info = self._load_scene_info()
+        metadata.stage_position_x = info.stage_x
+        metadata.stage_position_y = info.stage_y
+        images = self.ome_metadata.images
+        starts = [i.acquisition_date for i in images if i.acquisition_date]
+        metadata.imaging_datetime = min(starts) if starts else None
+        magnification = info.tcf_metadata["info"].get("Device", {}).get("Magnification")
+        metadata.objective = f"{round(magnification)}x" if magnification else None
+        return metadata
