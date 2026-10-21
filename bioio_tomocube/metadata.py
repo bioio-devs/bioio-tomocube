@@ -74,12 +74,12 @@ def _build_image(f: h5py.File, scene: str, index: int, refs: Dict[str, Any]) -> 
         "samples_per_pixel": 1,
     }
     if "/" in scene:  # fluorescence channel group carries wavelengths in µm
-        channel = group_attrs(f[f"Data/{scene}"])
+        channel = {k.lower(): v for k, v in group_attrs(f[f"Data/{scene}"]).items()}
         channel_kwargs["name"] = scene.split("/")[1]
-        for key, field in (("Excitation", "excitation"), ("Emission", "emission")):
+        for key in ("excitation", "emission"):
             if channel.get(key):
-                channel_kwargs[f"{field}_wavelength"] = float(channel[key]) * 1000.0
-                channel_kwargs[f"{field}_wavelength_unit"] = UnitsLength.NANOMETER
+                channel_kwargs[f"{key}_wavelength"] = float(channel[key]) * 1000.0
+                channel_kwargs[f"{key}_wavelength_unit"] = UnitsLength.NANOMETER
 
     pixels_kwargs: Dict[str, Any] = {
         "id": f"Pixels:{index}",
