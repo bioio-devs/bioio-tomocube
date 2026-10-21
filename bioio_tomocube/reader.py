@@ -166,7 +166,6 @@ class Reader(BaseReader):
     def dtype(self) -> np.dtype:
         return np.dtype(np.float32)
 
-
     @property
     def physical_pixel_sizes(self) -> types.PhysicalPixelSizes:
         return self._load_scene_info().pixel_sizes
