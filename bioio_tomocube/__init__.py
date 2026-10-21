@@ -10,3 +10,9 @@ except PackageNotFoundError:
     __version__ = "uninstalled"
 
 __author__ = "bioio-devs"
+__email__ = "brian.whitney@alleninstitute.org"
+
+from .reader import Reader
+from .reader_metadata import ReaderMetadata
+
+__all__ = ["Reader", "ReaderMetadata"]
