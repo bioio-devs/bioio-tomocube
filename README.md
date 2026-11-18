@@ -3,7 +3,7 @@
 [![Build Status](https://github.com/bioio-devs/bioio-tomocube/actions/workflows/ci.yml/badge.svg)](https://github.com/bioio-devs/bioio-tomocube/actions)
 [![PyPI version](https://badge.fury.io/py/bioio-tomocube.svg)](https://badge.fury.io/py/bioio-tomocube)
 [![License](https://img.shields.io/badge/License-BSD%203--Clause-blue.svg)](https://opensource.org/licenses/BSD-3-Clause)
-[![Python 3.11–3.15](https://img.shields.io/badge/python-3.11--3.15-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.11–3.14](https://img.shields.io/badge/python-3.11--3.14-blue.svg)](https://www.python.org/downloads/)
 
 A BioIO reader plugin for Tomocube `.TCF` holotomography files, the HDF5 container
 written by TomoStudio on HT-series instruments.
